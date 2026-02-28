@@ -1,0 +1,8 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+numpy==1.26.4
+soundfile==0.12.1
+torch==2.4.1
+diffusers==0.30.3
+transformers==4.44.2
+accelerate==0.34.2

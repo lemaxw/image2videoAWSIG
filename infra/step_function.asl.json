@@ -1,0 +1,280 @@
+{
+  "Comment": "Image-to-video batch pipeline orchestrated by Step Functions and SSM",
+  "StartAt": "ValidateInput",
+  "States": {
+    "ValidateInput": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "And": [
+            { "Variable": "$.job_id", "IsPresent": true },
+            { "Variable": "$.input_bucket", "IsPresent": true },
+            { "Variable": "$.input_prefix", "IsPresent": true },
+            { "Variable": "$.output_bucket", "IsPresent": true },
+            { "Variable": "$.output_prefix", "IsPresent": true }
+          ],
+          "Next": "AddDefaults"
+        }
+      ],
+      "Default": "InvalidInput"
+    },
+    "InvalidInput": {
+      "Type": "Fail",
+      "Error": "ValidationError",
+      "Cause": "Required keys: job_id, input_bucket, input_prefix, output_bucket, output_prefix"
+    },
+    "AddDefaults": {
+      "Type": "Pass",
+      "Parameters": {
+        "job_id.$": "$.job_id",
+        "input_bucket.$": "$.input_bucket",
+        "input_prefix.$": "$.input_prefix",
+        "output_bucket.$": "$.output_bucket",
+        "output_prefix.$": "$.output_prefix",
+        "max_fail_ratio": ${max_fail_ratio}
+      },
+      "Next": "StartInstance"
+    },
+    "StartInstance": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:runInstances",
+      "TimeoutSeconds": 300,
+      "Parameters": {
+        "LaunchTemplate": {
+          "LaunchTemplateId": "${launch_template_id}",
+          "Version": "$Latest"
+        },
+        "MinCount": 1,
+        "MaxCount": 1,
+        "TagSpecifications": [
+          {
+            "ResourceType": "instance",
+            "Tags": [
+              {
+                "Key": "Name",
+                "Value.$": "States.Format('img2vid-{}', $.job_id)"
+              },
+              {
+                "Key": "job_id",
+                "Value.$": "$.job_id"
+              }
+            ]
+          }
+        ]
+      },
+      "ResultSelector": {
+        "instance_id.$": "$.Instances[0].InstanceId"
+      },
+      "ResultPath": "$.ec2",
+      "Next": "WaitBeforeSSM",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2.0,
+          "MaxAttempts": 3
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "WorkflowFailedNoInstance"
+        }
+      ]
+    },
+    "WaitBeforeSSM": {
+      "Type": "Wait",
+      "Seconds": 20,
+      "Next": "WaitForSSM"
+    },
+    "WaitForSSM": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:describeInstanceInformation",
+      "TimeoutSeconds": 60,
+      "Parameters": {
+        "Filters": [
+          {
+            "Key": "InstanceIds",
+            "Values.$": "States.Array($.ec2.instance_id)"
+          }
+        ]
+      },
+      "ResultPath": "$.SsmInfo",
+      "Next": "IsSSMReady",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2.0,
+          "MaxAttempts": 6
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "TerminateInstanceAfterError"
+        }
+      ]
+    },
+    "IsSSMReady": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "And": [
+            { "Variable": "$.SsmInfo.InstanceInformationList[0]", "IsPresent": true },
+            { "Variable": "$.SsmInfo.InstanceInformationList[0].PingStatus", "StringEquals": "Online" }
+          ],
+          "Next": "RunOrchestrator"
+        }
+      ],
+      "Default": "WaitAndRetrySSM"
+    },
+    "WaitAndRetrySSM": {
+      "Type": "Wait",
+      "Seconds": 15,
+      "Next": "WaitForSSM"
+    },
+    "RunOrchestrator": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+      "TimeoutSeconds": 120,
+      "Parameters": {
+        "DocumentName": "AWS-RunShellScript",
+        "InstanceIds.$": "States.Array($.ec2.instance_id)",
+        "CloudWatchOutputConfig": {
+          "CloudWatchOutputEnabled": true,
+          "CloudWatchLogGroupName": "${ssm_log_group}"
+        },
+        "Parameters": {
+          "commands.$": "States.Array(States.Format('docker exec pipeline-orchestrator python /app/services/orchestrator/run_batch.py --job-id {} --input-bucket {} --input-prefix {} --output-bucket {} --output-prefix {} --max-fail-ratio {}', $.job_id, $.input_bucket, $.input_prefix, $.output_bucket, $.output_prefix, $.max_fail_ratio))"
+        }
+      },
+      "ResultPath": "$.RunCommand",
+      "Next": "CollectStatus",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 3,
+          "BackoffRate": 2.0,
+          "MaxAttempts": 3
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "TerminateInstanceAfterError"
+        }
+      ]
+    },
+    "CollectStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:getCommandInvocation",
+      "TimeoutSeconds": 30,
+      "Parameters": {
+        "CommandId.$": "$.RunCommand.Command.CommandId",
+        "InstanceId.$": "$.ec2.instance_id"
+      },
+      "ResultPath": "$.CommandStatus",
+      "Next": "StatusChoice",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 4,
+          "BackoffRate": 1.5,
+          "MaxAttempts": 4
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "TerminateInstanceAfterError"
+        }
+      ]
+    },
+    "StatusChoice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.CommandStatus.Status",
+          "StringEquals": "Success",
+          "Next": "TerminateInstanceSuccess"
+        },
+        {
+          "Or": [
+            { "Variable": "$.CommandStatus.Status", "StringEquals": "Pending" },
+            { "Variable": "$.CommandStatus.Status", "StringEquals": "InProgress" },
+            { "Variable": "$.CommandStatus.Status", "StringEquals": "Delayed" }
+          ],
+          "Next": "WaitAndPoll"
+        }
+      ],
+      "Default": "TerminateInstanceAfterFailure"
+    },
+    "WaitAndPoll": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "CollectStatus"
+    },
+    "TerminateInstanceSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:terminateInstances",
+      "Parameters": {
+        "InstanceIds.$": "States.Array($.ec2.instance_id)"
+      },
+      "Next": "Success",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 3,
+          "BackoffRate": 2.0,
+          "MaxAttempts": 5
+        }
+      ]
+    },
+    "TerminateInstanceAfterFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:terminateInstances",
+      "Parameters": {
+        "InstanceIds.$": "States.Array($.ec2.instance_id)"
+      },
+      "Next": "WorkflowFailed",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 3,
+          "BackoffRate": 2.0,
+          "MaxAttempts": 5
+        }
+      ]
+    },
+    "TerminateInstanceAfterError": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:terminateInstances",
+      "Parameters": {
+        "InstanceIds.$": "States.Array($.ec2.instance_id)"
+      },
+      "Next": "WorkflowFailed",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 3,
+          "BackoffRate": 2.0,
+          "MaxAttempts": 5
+        }
+      ]
+    },
+    "WorkflowFailed": {
+      "Type": "Fail",
+      "Error": "PipelineFailed",
+      "Cause": "Orchestrator failed. Instance was terminated."
+    },
+    "WorkflowFailedNoInstance": {
+      "Type": "Fail",
+      "Error": "PipelineFailed",
+      "Cause": "Failed before instance was created."
+    },
+    "Success": {
+      "Type": "Succeed"
+    }
+  }
+}

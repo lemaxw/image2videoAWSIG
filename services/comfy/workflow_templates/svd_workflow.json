@@ -1,0 +1,63 @@
+{
+  "3": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__INPUT_IMAGE__"
+    }
+  },
+  "5": {
+    "class_type": "ImageOnlyCheckpointLoader",
+    "inputs": {
+      "ckpt_name": "svd_xt.safetensors"
+    }
+  },
+  "10": {
+    "class_type": "SVD_img2vid_Conditioning",
+    "inputs": {
+      "width": __WIDTH__,
+      "height": __HEIGHT__,
+      "video_frames": __FRAMES__,
+      "motion_bucket_id": __MOTION_BUCKET_ID__,
+      "fps": __FPS__,
+      "augmentation_level": 0.0,
+      "clip_vision": ["5", 1],
+      "init_image": ["3", 0],
+      "vae": ["5", 2]
+    }
+  },
+  "11": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": __SEED__,
+      "steps": __STEPS__,
+      "cfg": 2.5,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1,
+      "model": ["5", 0],
+      "positive": ["10", 0],
+      "negative": ["10", 1],
+      "latent_image": ["10", 2]
+    }
+  },
+  "12": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["11", 0],
+      "vae": ["5", 2]
+    }
+  },
+  "13": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+      "frame_rate": __FPS__,
+      "loop_count": 0,
+      "filename_prefix": "__OUTPUT_PREFIX__",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 20,
+      "save_output": true,
+      "images": ["12", 0]
+    }
+  }
+}

@@ -1,0 +1,69 @@
+services:
+  comfyui:
+    image: ghcr.io/comfyanonymous/comfyui:latest
+    container_name: pipeline-comfyui
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8188:8188"
+    environment:
+      - CLI_ARGS=--listen 0.0.0.0 --port 8188 --output-directory /data/outputs/comfy
+    volumes:
+      - ${MODEL_DIR:-/data/models}:/data/models
+      - ${OUTPUT_DIR:-/data/outputs}:/data/outputs
+      - ./workflow_templates:/app/workflow_templates:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "bash", "/app/workflow_templates/../scripts/healthcheck_comfy.sh"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
+  audio:
+    build:
+      context: ..
+      dockerfile: audio/Dockerfile
+    container_name: pipeline-audio
+    restart: unless-stopped
+    environment:
+      - AUDIO_CACHE_DIR=/cache
+      - AUDIO_MODEL_BACKEND=${AUDIO_MODEL_BACKEND:-mock}
+      - AUDIO_DEVICE=${AUDIO_DEVICE:-cpu}
+    volumes:
+      - ${AUDIO_CACHE_DIR:-/data/audio-cache}:/cache
+      - ${OUTPUT_DIR:-/data/outputs}:/outputs
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
+  orchestrator:
+    build:
+      context: ../..
+      dockerfile: services/orchestrator/Dockerfile
+    container_name: pipeline-orchestrator
+    restart: unless-stopped
+    command: ["tail", "-f", "/dev/null"]
+    environment:
+      - COMFY_URL=http://comfyui:8188
+      - AUDIO_URL=http://audio:8000
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4.1-mini}
+      - OUTPUT_DIR=/data/outputs
+      - INPUT_DIR=/data/inputs
+      - DEFAULT_INPUT_BUCKET=${DEFAULT_INPUT_BUCKET:-}
+      - DEFAULT_OUTPUT_BUCKET=${DEFAULT_OUTPUT_BUCKET:-}
+    volumes:
+      - ${OUTPUT_DIR:-/data/outputs}:/data/outputs
+      - ${MODEL_DIR:-/data/models}:/data/models
+      - /tmp:/tmp
+    depends_on:
+      comfyui:
+        condition: service_healthy
+      audio:
+        condition: service_healthy
