@@ -7,3 +7,7 @@ __pycache__/
 .env
 *.log
 tmp/
+.video_input/
+.video_output/
+.local/
+.venv/

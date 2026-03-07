@@ -1,31 +1,31 @@
 services:
   comfyui:
-    image: ghcr.io/comfyanonymous/comfyui:latest
+    build:
+      context: ../..
+      dockerfile: services/comfy/Dockerfile
+    image: pipeline-comfyui-local
     container_name: pipeline-comfyui
     restart: unless-stopped
+    command: ["python", "main.py", "--listen", "0.0.0.0", "--port", "8188", "--output-directory", "/data/outputs/comfy", "--cpu"]
     ports:
       - "127.0.0.1:8188:8188"
-    environment:
-      - CLI_ARGS=--listen 0.0.0.0 --port 8188 --output-directory /data/outputs/comfy
     volumes:
-      - ${MODEL_DIR:-/data/models}:/data/models
+      - ${MODEL_DIR:-/data/models}:/opt/ComfyUI/models
       - ${OUTPUT_DIR:-/data/outputs}:/data/outputs
+      - shared_inputs:/data/inputs
       - ./workflow_templates:/app/workflow_templates:ro
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
+      - ./scripts:/app/scripts:ro
     healthcheck:
       test: ["CMD", "bash", "/app/workflow_templates/../scripts/healthcheck_comfy.sh"]
-      interval: 15s
+      interval: 5s
       timeout: 5s
-      retries: 20
+      retries: 60
+      start_period: 90s
 
   audio:
     build:
-      context: ..
-      dockerfile: audio/Dockerfile
+      context: ../..
+      dockerfile: services/audio/Dockerfile
     container_name: pipeline-audio
     restart: unless-stopped
     environment:
@@ -33,10 +33,11 @@ services:
       - AUDIO_MODEL_BACKEND=${AUDIO_MODEL_BACKEND:-mock}
       - AUDIO_DEVICE=${AUDIO_DEVICE:-cpu}
     volumes:
+      - ../audio/audio_service.py:/app/audio_service.py:ro
       - ${AUDIO_CACHE_DIR:-/data/audio-cache}:/cache
-      - ${OUTPUT_DIR:-/data/outputs}:/outputs
+      - ${OUTPUT_DIR:-/data/outputs}:/data/outputs
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${AUDIO_HOST_PORT:-8000}:8000"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
       interval: 15s
@@ -54,16 +55,22 @@ services:
       - COMFY_URL=http://comfyui:8188
       - AUDIO_URL=http://audio:8000
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4.1-mini}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OUTPUT_DIR=/data/outputs
       - INPUT_DIR=/data/inputs
-      - DEFAULT_INPUT_BUCKET=${DEFAULT_INPUT_BUCKET:-}
-      - DEFAULT_OUTPUT_BUCKET=${DEFAULT_OUTPUT_BUCKET:-}
     volumes:
+      - ../..:/app
       - ${OUTPUT_DIR:-/data/outputs}:/data/outputs
       - ${MODEL_DIR:-/data/models}:/data/models
+      - shared_inputs:/data/inputs
+      - ${LOCAL_INPUT_DIR:-/tmp/local_inputs}:/data/local_inputs
+      - ${LOCAL_OUTPUT_DIR:-/tmp/local_outputs}:/data/local_outputs
       - /tmp:/tmp
     depends_on:
       comfyui:
-        condition: service_healthy
+        condition: service_started
       audio:
         condition: service_healthy
+
+volumes:
+  shared_inputs:

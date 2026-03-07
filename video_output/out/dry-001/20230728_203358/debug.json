@@ -1,0 +1,280 @@
+{
+  "input_key": "20230728_203358.jpg",
+  "job_id": "dry-001",
+  "attempts": [
+    {
+      "index": 0,
+      "video": {
+        "preset": "SVD_STRONG",
+        "duration_s": 5,
+        "fps": 5,
+        "frames": 25,
+        "resolution_width": 768,
+        "seed": 123,
+        "params": {
+          "motion_bucket_id": 24,
+          "steps": 24,
+          "duration_s": 5,
+          "fps": 5,
+          "frames": 25,
+          "resolution_width": 768,
+          "seed": 123,
+          "requested_preset": "SVD_STRONG",
+          "target_aspect": "instagram_reel_9_16"
+        }
+      },
+      "status": "success",
+      "workflow_build_s": 0.147,
+      "submit_s": 0.002,
+      "comfy_wait_s": 126.087,
+      "find_video_s": 0.0,
+      "audio_generate_s": 0.875,
+      "audio_backend": "audioldm",
+      "mux_s": 0.285,
+      "prompt_id": "bb421732-1846-4088-963c-fca12284d9bc",
+      "video_path": "/data/outputs/comfy/dry-001-20230728_203358-0-69888d_00001.mp4",
+      "audio_path": "/data/outputs/audio/dry-001/20230728_203358/audio-cc3637e712.wav",
+      "render_s": 127.396
+    }
+  ],
+  "timings": {
+    "download_s": 0.002,
+    "decision_s": 3.579,
+    "total_s": 130.978,
+    "upload_video_s": 0.002,
+    "upload_debug_s": 0.001
+  },
+  "status": "success",
+  "error": null,
+  "decision": {
+    "scene": {
+      "tags": [
+        "fallback",
+        "unknown_scene"
+      ],
+      "has_people": false,
+      "confidence": 0.3
+    },
+    "framing": {
+      "target_aspect": "instagram_reel_9_16",
+      "crop_anchor": "center_center"
+    },
+    "video": {
+      "preset": "SVD_STRONG",
+      "duration_s": 5,
+      "fps": 5,
+      "frames": 25,
+      "resolution_width": 768,
+      "seed": 123,
+      "params": {
+        "motion_bucket_id": 24,
+        "steps": 24,
+        "duration_s": 5,
+        "fps": 5,
+        "frames": 25,
+        "resolution_width": 768,
+        "seed": 123,
+        "requested_preset": "SVD_STRONG",
+        "target_aspect": "instagram_reel_9_16"
+      }
+    },
+    "audio": {
+      "prompt": "urban city ambient",
+      "duration_s": 5,
+      "mix_db": -8.0
+    },
+    "fallbacks": [
+      {
+        "preset": "SVD_SUBTLE",
+        "duration_s": 5,
+        "fps": 5,
+        "frames": 25,
+        "resolution_width": 768,
+        "seed": 123,
+        "params": {
+          "motion_bucket_id": 24,
+          "steps": 24,
+          "duration_s": 5,
+          "fps": 5,
+          "frames": 25,
+          "resolution_width": 768,
+          "seed": 123,
+          "requested_preset": "SVD_SUBTLE",
+          "target_aspect": "instagram_reel_9_16"
+        }
+      },
+      {
+        "preset": "FAILSAFE_LOW_MEM",
+        "duration_s": 3,
+        "fps": 5,
+        "frames": 25,
+        "resolution_width": 768,
+        "seed": 123,
+        "params": {
+          "motion_bucket_id": 24,
+          "steps": 24,
+          "duration_s": 3,
+          "fps": 5,
+          "frames": 25,
+          "resolution_width": 768,
+          "seed": 123,
+          "requested_preset": "FAILSAFE_LOW_MEM",
+          "target_aspect": "instagram_reel_9_16"
+        }
+      }
+    ]
+  },
+  "framing": {
+    "path": "/data/inputs/20230728_203358.ig.jpg",
+    "target_aspect": "instagram_reel_9_16",
+    "crop_anchor": "center_center",
+    "source_size": {
+      "width": 1536,
+      "height": 2048
+    },
+    "crop_box": {
+      "left": 192,
+      "top": 0,
+      "right": 1344,
+      "bottom": 2048
+    },
+    "output_size": {
+      "width": 1152,
+      "height": 2048
+    }
+  },
+  "openai": {
+    "model": "gpt-4.1-mini",
+    "attempts": 1,
+    "usage": {
+      "input_tokens": 2637,
+      "output_tokens": 109,
+      "total_tokens": 2746
+    },
+    "status": "ok_chat_fallback",
+    "io": {
+      "request": {
+        "api_mode_preference": "responses_json_schema_then_chat_fallback",
+        "model": "gpt-4.1-mini",
+        "system_prompt": "You are a video preset decision engine for image-to-video.\nOutput JSON only and follow the schema exactly.\n\nPreset guide (choose one primary + exactly 2 fallbacks from this enum):\n- SVD_SUBTLE: conservative motion, best identity preservation.\n- SVD_STRONG: stronger movement, more cinematic but higher risk of artifacts.\n- ANIMATEDIFF_GRASS_WIND: natural outdoor motion vibe.\n- ANIMATEDIFF_CITY_PULSE: urban motion vibe.\n- FAILSAFE_LOW_MEM: safest/lowest-memory fallback.\n\nFraming guide:\n- target_aspect must be instagram_reel_9_16.\n- crop_anchor must choose where important subject stays after crop:\n  left_top, center_top, right_top, left_center, center_center, right_center, left_bottom, center_bottom, right_bottom.\n\nAudio guide:\n- Keep audio.prompt short and concrete (2-8 words, max 96 chars), no long sentence.\n\nIf uncertain, prefer SVD_SUBTLE or FAILSAFE_LOW_MEM.",
+        "user_text": "Return decision JSON for image-to-video rendering. Metadata: {\"job_id\": \"dry-001\", \"input_key\": \"20230728_203358.jpg\"}. Enforce schema constraints, include exactly two fallbacks, and set framing.target_aspect=instagram_reel_9_16. Use only preset enum values exactly as provided.",
+        "image": {
+          "path": "/data/inputs/20230728_203358.jpg",
+          "bytes": 1152254,
+          "sha256": "0d151be5a70beb6c0309b8779796646b9795611321e4d7c6572d37629fb15aff",
+          "mime": "image/jpeg"
+        },
+        "metadata": {
+          "job_id": "dry-001",
+          "input_key": "20230728_203358.jpg"
+        }
+      },
+      "attempts": [
+        {
+          "attempt": 1,
+          "api_mode": "chat_completions",
+          "usage": {
+            "input_tokens": 2637,
+            "output_tokens": 109,
+            "total_tokens": 2746
+          },
+          "raw_output_text": "{\n  \"job_id\": \"dry-001\",\n  \"input_key\": \"20230728_203358.jpg\",\n  \"preset\": \"ANIMATEDIFF_CITY_PULSE\",\n  \"fallbacks\": [\"SVD_SUBTLE\", \"FAILSAFE_LOW_MEM\"],\n  \"framing\": {\n    \"target_aspect\": \"instagram_reel_9_16\",\n    \"crop_anchor\": \"center_center\"\n  },\n  \"audio\": {\n    \"prompt\": \"urban city ambient\"\n  }\n}"
+        }
+      ]
+    }
+  },
+  "workflow_used": {
+    "3": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "/data/inputs/20230728_203358.ig.jpg"
+      }
+    },
+    "5": {
+      "class_type": "ImageOnlyCheckpointLoader",
+      "inputs": {
+        "ckpt_name": "svd_xt.safetensors"
+      }
+    },
+    "10": {
+      "class_type": "SVD_img2vid_Conditioning",
+      "inputs": {
+        "width": 448,
+        "height": 768,
+        "video_frames": 25,
+        "motion_bucket_id": 24,
+        "fps": 5,
+        "augmentation_level": 0.0,
+        "clip_vision": [
+          "5",
+          1
+        ],
+        "init_image": [
+          "3",
+          0
+        ],
+        "vae": [
+          "5",
+          2
+        ]
+      }
+    },
+    "11": {
+      "class_type": "KSampler",
+      "inputs": {
+        "seed": 123,
+        "steps": 24,
+        "cfg": 2.5,
+        "sampler_name": "euler",
+        "scheduler": "normal",
+        "denoise": 1,
+        "model": [
+          "5",
+          0
+        ],
+        "positive": [
+          "10",
+          0
+        ],
+        "negative": [
+          "10",
+          1
+        ],
+        "latent_image": [
+          "10",
+          2
+        ]
+      }
+    },
+    "12": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": [
+          "11",
+          0
+        ],
+        "vae": [
+          "5",
+          2
+        ]
+      }
+    },
+    "13": {
+      "class_type": "VHS_VideoCombine",
+      "inputs": {
+        "frame_rate": 5,
+        "loop_count": 0,
+        "filename_prefix": "dry-001-20230728_203358-0-69888d",
+        "format": "video/h264-mp4",
+        "pix_fmt": "yuv420p",
+        "crf": 20,
+        "pingpong": false,
+        "save_output": true,
+        "images": [
+          "12",
+          0
+        ]
+      }
+    }
+  }
+}

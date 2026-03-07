@@ -1,122 +1,199 @@
-# AWS Image-to-Video Batch Pipeline (MVP)
+# Image-to-Video Local Pipeline
 
-End-to-end CLI-deployable pipeline that:
-- Reads images from S3
-- Uses OpenAI vision decision JSON (structured outputs)
-- Renders via ComfyUI on GPU EC2
-- Generates audio via local FastAPI audio service
-- Muxes audio + video with ffmpeg
-- Uploads `final.mp4` + `debug.json` back to S3
-- Orchestrates with AWS Step Functions and always terminates GPU instance
+Local-only image-to-video pipeline (no AWS/S3/AMI/infra flow).
 
-## Repo layout
+## Services
 
-- `infra/`: Terraform + Step Functions ASL
-- `ami/user_data.sh`: host bootstrap (Docker, NVIDIA toolkit, EBS mount, compose up)
-- `services/decision/decision_service.py`: OpenAI structured decision
-- `services/orchestrator/`: batch runner and helpers
-- `services/audio/audio_service.py`: audio generation service (AudioLDM option + CPU/mock fallback)
-- `services/comfy/`: compose stack + workflow templates + health scripts
+- `services/decision`:
+  - Sends image + prompt to OpenAI and returns structured decision JSON:
+    - scene (`tags`, `has_people`, `confidence`)
+    - framing (`target_aspect`, `crop_anchor`)
+    - video preset/fallbacks
+    - audio prompt/mix
+- `services/comfy`:
+  - Runs ComfyUI and executes render workflows.
+  - Uses workflow templates in `services/comfy/workflow_templates/`.
+  - Outputs rendered media to `/data/outputs/comfy`.
+- `services/audio`:
+  - FastAPI service for audio generation.
+  - Backends:
+    - `audioldm` (model generation)
+    - `mock` / `mock-fallback` (simple synthetic tone/noise fallback)
+  - AudioLDM path generates multiple candidates, selects the best via RMS/clipping score,
+    then applies ffmpeg post-processing (`loudnorm`, limiter, bass, stereo widen, reverb, fade).
+  - Final output wav is post-processed to `48kHz` stereo.
+  - Outputs wav files to `/data/outputs/audio`.
+- `services/orchestrator`:
+  - Main batch runner (`run_batch.py`).
+  - Loads local images, calls decision service, crops input for IG 9:16,
+    renders with Comfy, generates audio, muxes final mp4, writes `debug.json`.
 
-## Prereqs
+## Prerequisites
 
-- Terraform >= 1.5
-- AWS CLI configured
-- Existing VPC/subnet
-- An AMI suitable for GPU instances (Ubuntu recommended)
-- OpenAI API key available to orchestrator container (`OPENAI_API_KEY`)
+- Docker + Docker Compose plugin
+- NVIDIA driver + Docker GPU runtime (for GPU render/audio)
+- Local folders:
+  - input images: `video_input/`
+  - outputs: `video_output/`
+  - models: `.local/models/`
+  - render output/cache: `.local/outputs/`
+  - audio cache: `.local/audio-cache/`
 
-## 1) Deploy infra
+## Model Preparation
 
-Create `infra/terraform.tfvars`:
-
-```hcl
-aws_region        = "us-east-1"
-name_prefix       = "img2vid"
-vpc_id            = "vpc-xxxxxxxx"
-subnet_id         = "subnet-xxxxxxxx"
-ami_id            = "ami-xxxxxxxx"
-create_buckets    = false
-input_bucket_name = "my-input-bucket"
-output_bucket_name = "my-output-bucket"
-
-# Upload this repo tarball and set URI so user_data can bootstrap host
-artifact_s3_uri   = "s3://my-artifacts/image2videoAWSIG.tgz"
-```
-
-Package and upload artifact:
+Create checkpoint folder:
 
 ```bash
-tar -czf /tmp/image2videoAWSIG.tgz .
-aws s3 cp /tmp/image2videoAWSIG.tgz s3://my-artifacts/image2videoAWSIG.tgz
+mkdir -p "${MODEL_DIR:-$PWD/.local/models}/checkpoints"
 ```
 
-Deploy:
+Download required checkpoints:
 
 ```bash
-cd infra
-terraform init
-terraform apply
+curl -L "https://huggingface.co/stabilityai/stable-video-diffusion-img2vid-xt/resolve/main/svd_xt.safetensors?download=true" \
+  -o "${MODEL_DIR:-$PWD/.local/models}/checkpoints/svd_xt.safetensors"
+
+curl -L "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors?download=true" \
+  -o "${MODEL_DIR:-$PWD/.local/models}/checkpoints/sd_xl_base_1.0.safetensors"
 ```
 
-Capture output:
+Verify:
 
 ```bash
-terraform output -raw state_machine_arn
+ls -lh "${MODEL_DIR:-$PWD/.local/models}/checkpoints"
 ```
 
-## 2) Upload input images
+## Environment Variables
 
-Expected run input includes `input_prefix`, for example `jobs/demo-001/input`:
+Set these in `.env`:
+
+- `LOCAL_INPUT_DIR`: host path mounted to `/data/local_inputs`
+- `LOCAL_OUTPUT_DIR`: host path mounted to `/data/local_outputs`
+- `MODEL_DIR`: host path mounted to `/opt/ComfyUI/models`
+- `OUTPUT_DIR`: host path mounted to `/data/outputs`
+- `AUDIO_CACHE_DIR`: host path mounted to `/cache`
+- `AUDIO_HOST_PORT`: local forwarded audio port (example `8001`)
+- `OPENAI_API_KEY`: decision API key
+- `OPENAI_MODEL`: decision model (example `gpt-5-mini`)
+- `AUDIO_MODEL_BACKEND`: `audioldm` or `mock`
+- `AUDIO_DEVICE`: `cuda` or `cpu`
+- `AUDIO_INFERENCE_STEPS`: AudioLDM inference steps (default `60`)
+- `AUDIO_GUIDANCE_SCALE`: AudioLDM guidance scale (default `3.5`)
+- `AUDIO_NUM_SAMPLES`: candidates generated per prompt (default `3`)
+- `AUDIO_SEED_BASE`: deterministic seed base (default `42`)
+- `AUDIO_TARGET_LUFS`: loudness target for `loudnorm` (default `-16`)
+- `AUDIO_TRUE_PEAK_DB`: true-peak ceiling in dB (default `-1.0`)
+- `AUDIO_BASS_GAIN_DB`: bass enhancement gain (default `3`)
+- `AUDIO_STEREO_MLEV`: stereo widening amount (default `0.03`)
+- `AUDIO_REVERB_DELAY_MS`: reverb delay in ms (default `1000`)
+- `AUDIO_REVERB_DECAY`: reverb decay (default `0.3`)
+
+Container runtime env is set in compose:
+- `COMFY_URL=http://comfyui:8188`
+- `AUDIO_URL=http://audio:8000`
+- `INPUT_DIR=/data/inputs`
+- `OUTPUT_DIR=/data/outputs`
+
+## Start Stack
 
 ```bash
-aws s3 cp ./my_images s3://my-input-bucket/jobs/demo-001/input/ --recursive
+docker compose --env-file $(pwd)/.env \
+  -f services/comfy/docker-compose.yml \
+  -f services/comfy/docker-compose.gpu.yml \
+  up -d --build
 ```
 
-## 3) Start a Step Functions run
+If models changed, restart Comfy:
 
 ```bash
-aws stepfunctions start-execution \
-  --state-machine-arn "$(cd infra && terraform output -raw state_machine_arn)" \
-  --name "demo-001-$(date +%s)" \
-  --input '{
-    "job_id":"demo-001",
-    "input_bucket":"my-input-bucket",
-    "input_prefix":"jobs/demo-001/input",
-    "output_bucket":"my-output-bucket",
-    "output_prefix":"jobs/demo-001/output"
-  }'
+docker compose --env-file $(pwd)/.env \
+  -f services/comfy/docker-compose.yml \
+  -f services/comfy/docker-compose.gpu.yml \
+  restart comfyui
 ```
 
-## 4) View outputs
+If `.env` changed for audio backend/device, recreate audio (restart is not enough):
 
-- Final videos:
-  - `s3://<output_bucket>/<output_prefix>/<job_id>/<image_basename>/final.mp4`
-- Debug payload:
-  - `s3://<output_bucket>/<output_prefix>/<job_id>/<image_basename>/debug.json`
+```bash
+docker compose --env-file $(pwd)/.env \
+  -f services/comfy/docker-compose.yml \
+  -f services/comfy/docker-compose.gpu.yml \
+  up -d --force-recreate audio
+```
+
+## Run Batch
+
+```bash
+docker exec pipeline-orchestrator python /app/services/orchestrator/run_batch.py \
+  --job-id dry-001 \
+  --input-prefix . \
+  --output-prefix out \
+  --local-input-dir /data/local_inputs \
+  --local-output-dir /data/local_outputs
+```
+
+## Defaults
+
+Applied automatically when no explicit override is provided:
+
+```json
+{"fps":5,"frames":25,"resolution_width":768,"steps":24,"motion_bucket_id":24,"seed":123}
+```
+
+Override at runtime:
+
+```bash
+--video-params-json '{"fps":5,"frames":25,"resolution_width":768,"steps":24,"motion_bucket_id":24,"seed":123,"crop_anchor":"center_center"}'
+```
+
+## Debug Mode
+
+- `debug.json` is always saved.
+- Intermediate artifacts are kept only with `--debug`.
 
 Example:
 
 ```bash
-aws s3 ls s3://my-output-bucket/jobs/demo-001/output/demo-001/ --recursive
-```
-
-## Dry run (no AWS)
-
-Run orchestrator locally against folders:
-
-```bash
-python services/orchestrator/run_batch.py \
-  --job-id local-demo \
+docker exec pipeline-orchestrator python /app/services/orchestrator/run_batch.py \
+  --job-id dry-001 \
   --input-prefix . \
   --output-prefix out \
-  --dry-run \
-  --local-input-dir ./local_inputs \
-  --local-output-dir ./local_outputs
+  --local-input-dir /data/local_inputs \
+  --local-output-dir /data/local_outputs \
+  --debug
 ```
 
-## Notes
+## Outputs
 
-- `audio_service` supports `AUDIO_MODEL_BACKEND=audioldm` if model dependencies are available.
-- Default backend is `mock` for quick MVP runs.
-- ComfyUI templates are low-memory oriented and support runtime parameter injection.
+- `video_output/out/<job-id>/<image-basename>/final.mp4`
+- `video_output/out/<job-id>/<image-basename>/debug.json`
+
+## Diagnostics
+
+Comfy:
+
+```bash
+docker logs pipeline-comfyui --tail 120
+```
+
+Audio:
+
+```bash
+docker logs pipeline-audio --tail 120
+docker exec pipeline-audio /bin/sh -lc 'env | grep ^AUDIO_'
+```
+
+Orchestrator:
+
+```bash
+docker logs pipeline-orchestrator --tail 120
+```
+
+## Stop
+
+```bash
+docker compose --env-file $(pwd)/.env \
+  -f services/comfy/docker-compose.yml \
+  -f services/comfy/docker-compose.gpu.yml \
+  down
+```

@@ -58,6 +58,7 @@
       "format": "video/h264-mp4",
       "pix_fmt": "yuv420p",
       "crf": 20,
+      "pingpong": false,
       "save_output": true,
       "images": ["6", 0]
     }

@@ -1,36 +1,36 @@
-# Orchestrator Service
+# Orchestrator (Local Only)
 
-## Entry point
+Entry point: `services/orchestrator/run_batch.py`
 
-`run_batch.py` drives the full pipeline for a batch:
+## Required args
 
-1. List image keys from S3 (or local folder in dry-run mode)
-2. Download image
-3. Call OpenAI decision service for structured decision JSON
-4. Render with ComfyUI (with fallbacks)
-5. Generate audio from local audio service
-6. Mux video+audio with ffmpeg
-7. Upload `final.mp4` + `debug.json`
+- `--job-id`
+- `--input-prefix`
+- `--output-prefix`
+- `--local-input-dir`
+- `--local-output-dir`
 
-## CLI
+## Optional args
 
-```bash
-python services/orchestrator/run_batch.py \
-  --job-id demo-001 \
-  --input-bucket my-input \
-  --input-prefix jobs/demo-001/input \
-  --output-bucket my-output \
-  --output-prefix jobs/demo-001/output
+- `--video-params-json` (JSON object)
+- `--debug` keep intermediate artifacts
+- `--max-fail-ratio` (default `0.3`)
+
+## Default video params
+
+Applied on every run (unless overridden by `--video-params-json`):
+
+```json
+{"fps":5,"frames":25,"resolution_width":768,"steps":24,"motion_bucket_id":24,"seed":123}
 ```
 
-## Dry run
+## Example
 
 ```bash
-python services/orchestrator/run_batch.py \
+python /app/services/orchestrator/run_batch.py \
   --job-id dry-001 \
   --input-prefix . \
   --output-prefix out \
-  --dry-run \
-  --local-input-dir ./local_inputs \
-  --local-output-dir ./local_outputs
+  --local-input-dir /data/local_inputs \
+  --local-output-dir /data/local_outputs
 ```
