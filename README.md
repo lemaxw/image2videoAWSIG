@@ -60,6 +60,19 @@ curl -L "https://huggingface.co/Comfy-Org/stable-diffusion-v1-5-archive/resolve/
   -o "${MODEL_DIR:-$PWD/.local/models}/checkpoints/v1-5-pruned-emaonly-fp16.safetensors"
 ```
 
+Optional anime checkpoints used by preset defaults:
+
+```bash
+curl -L "https://huggingface.co/Xiero/Meinamix/resolve/e19075878a33073d3f5e6e16e19f82ab7056719f/meinamix_meinaV11.safetensors?download=true" \
+  -o "${MODEL_DIR:-$PWD/.local/models}/checkpoints/meinamix_v11.safetensors"
+
+curl -L "https://huggingface.co/gsdf/Counterfeit-V3.0/resolve/main/Counterfeit-V3.0_fp16.safetensors?download=true" \
+  -o "${MODEL_DIR:-$PWD/.local/models}/checkpoints/counterfeit_v30.safetensors"
+
+curl -L "https://huggingface.co/jackson885/anything-v5-PrtRE/resolve/main/anything-v5-PrtRE.safetensors?download=true" \
+  -o "${MODEL_DIR:-$PWD/.local/models}/checkpoints/anything-v5-prt.safetensors"
+```
+
 Verify:
 
 ```bash
@@ -68,8 +81,11 @@ ls -lh "${MODEL_DIR:-$PWD/.local/models}/checkpoints"
 
 Current model selection:
 
-- All presets use SVD video generation via `svd_xt.safetensors`
-- All presets use SD 1.5 anime redraw via `v1-5-pruned-emaonly-fp16.safetensors`
+- All presets use the same two-stage pipeline:
+  - stage A: SD 1.5 anime redraw
+  - stage B: SVD video generation from the anime still
+- Core video model: `svd_xt.safetensors`
+- Core anime redraw fallback model: `v1-5-pruned-emaonly-fp16.safetensors`
 - The old AnimateDiff motion module is no longer used by the active pipeline
 - If available, anime redraw presets prefer:
   - `meinamix_v11.safetensors`
@@ -169,6 +185,12 @@ Available video presets:
 
 Preset behavior:
 - Every preset renders an anime still first, then runs SVD img2vid
+- `SVD_SUBTLE`: gentlest anime redraw + conservative motion
+- `SVD_STRONG`: stronger anime redraw + stronger SVD motion
+- `ANIMATEDIFF_GRASS_WIND`: outdoor/nature anime styling profile
+- `ANIMATEDIFF_CITY_PULSE`: urban/night/reflections anime styling profile
+- `ANIMATEDIFF_LOW_MEM`: simplified anime styling profile
+- `FAILSAFE_LOW_MEM`: safest anime styling + motion fallback
 - Preset names now act as style/motion profiles, not as separate backend families
 
 Override at runtime:
@@ -179,7 +201,7 @@ Override at runtime:
 
 When `--video-params-json` is provided, only the keys you pass are overridden. It does not merge with the default override block.
 
-Force low-memory AnimateDiff:
+Force simplified low-memory style profile:
 
 ```bash
 --video-params-json '{"preset":"ANIMATEDIFF_LOW_MEM"}'
@@ -236,3 +258,8 @@ docker compose --env-file $(pwd)/.env \
   -f services/comfy/docker-compose.gpu.yml \
   down
 ```
+
+## License
+
+This repository is licensed under the MIT License.
+See [LICENSE](/home/mpshater/hobby/image2videoAWSIG/LICENSE) for details.
