@@ -14,6 +14,9 @@ Local-only image-to-video pipeline (no AWS/S3/AMI/infra flow).
   - Runs ComfyUI and executes render workflows.
   - Uses workflow templates in `services/comfy/workflow_templates/`.
   - Outputs rendered media to `/data/outputs/comfy`.
+  - Current pipeline for all presets is:
+    - stage A: SD 1.5 anime redraw still
+    - stage B: SVD img2vid from that anime still
 - `services/audio`:
   - FastAPI service for audio generation.
   - Backends:
@@ -53,8 +56,8 @@ Download required checkpoints:
 curl -L "https://huggingface.co/stabilityai/stable-video-diffusion-img2vid-xt/resolve/main/svd_xt.safetensors?download=true" \
   -o "${MODEL_DIR:-$PWD/.local/models}/checkpoints/svd_xt.safetensors"
 
-curl -L "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors?download=true" \
-  -o "${MODEL_DIR:-$PWD/.local/models}/checkpoints/sd_xl_base_1.0.safetensors"
+curl -L "https://huggingface.co/Comfy-Org/stable-diffusion-v1-5-archive/resolve/main/v1-5-pruned-emaonly-fp16.safetensors?download=true" \
+  -o "${MODEL_DIR:-$PWD/.local/models}/checkpoints/v1-5-pruned-emaonly-fp16.safetensors"
 ```
 
 Verify:
@@ -62,6 +65,16 @@ Verify:
 ```bash
 ls -lh "${MODEL_DIR:-$PWD/.local/models}/checkpoints"
 ```
+
+Current model selection:
+
+- All presets use SVD video generation via `svd_xt.safetensors`
+- All presets use SD 1.5 anime redraw via `v1-5-pruned-emaonly-fp16.safetensors`
+- The old AnimateDiff motion module is no longer used by the active pipeline
+- If available, anime redraw presets prefer:
+  - `meinamix_v11.safetensors`
+  - `counterfeit_v30.safetensors`
+  - `anything-v5-prt.safetensors`
 
 ## Environment Variables
 
@@ -81,12 +94,16 @@ Set these in `.env`:
 - `AUDIO_GUIDANCE_SCALE`: AudioLDM guidance scale (default `3.5`)
 - `AUDIO_NUM_SAMPLES`: candidates generated per prompt (default `3`)
 - `AUDIO_SEED_BASE`: deterministic seed base (default `42`)
-- `AUDIO_TARGET_LUFS`: loudness target for `loudnorm` (default `-16`)
+- `AUDIO_TARGET_LUFS`: loudness target for `loudnorm` (default `-14`)
 - `AUDIO_TRUE_PEAK_DB`: true-peak ceiling in dB (default `-1.0`)
 - `AUDIO_BASS_GAIN_DB`: bass enhancement gain (default `3`)
 - `AUDIO_STEREO_MLEV`: stereo widening amount (default `0.03`)
 - `AUDIO_REVERB_DELAY_MS`: reverb delay in ms (default `1000`)
 - `AUDIO_REVERB_DECAY`: reverb decay (default `0.3`)
+- `AUDIO_MUX_GAIN_DB`: gain added at final mux stage (default `3.0`)
+- `AUDIO_MUX_TARGET_LUFS`: mux-stage loudnorm target (default `-12.0`)
+- `AUDIO_MUX_TRUE_PEAK_DB`: mux-stage true peak ceiling (default `-1.0`)
+- `COMFY_PROMPT_TIMEOUT_S`: max wait for one Comfy prompt before orchestrator fails (default `3600`)
 
 Container runtime env is set in compose:
 - `COMFY_URL=http://comfyui:8188`
@@ -137,18 +154,40 @@ docker exec pipeline-orchestrator python /app/services/orchestrator/run_batch.py
 Applied automatically when no explicit override is provided:
 
 ```json
-{"fps":5,"frames":25,"resolution_width":768,"steps":24,"motion_bucket_id":24,"seed":123}
+{"fps":5,"frames":25,"resolution_width":768,"steps":24,"motion_bucket_id":24}
 ```
+
+`seed` is auto-generated per run unless you pass it explicitly.
+
+Available video presets:
+- `SVD_SUBTLE`
+- `SVD_STRONG`
+- `ANIMATEDIFF_GRASS_WIND`
+- `ANIMATEDIFF_CITY_PULSE`
+- `ANIMATEDIFF_LOW_MEM`
+- `FAILSAFE_LOW_MEM`
+
+Preset behavior:
+- Every preset renders an anime still first, then runs SVD img2vid
+- Preset names now act as style/motion profiles, not as separate backend families
 
 Override at runtime:
 
 ```bash
---video-params-json '{"fps":5,"frames":25,"resolution_width":768,"steps":24,"motion_bucket_id":24,"seed":123,"crop_anchor":"center_center"}'
+--video-params-json '{"fps":5,"frames":25,"resolution_width":768,"steps":24,"motion_bucket_id":24,"crop_anchor":"center_center"}'
+```
+
+When `--video-params-json` is provided, only the keys you pass are overridden. It does not merge with the default override block.
+
+Force low-memory AnimateDiff:
+
+```bash
+--video-params-json '{"preset":"ANIMATEDIFF_LOW_MEM"}'
 ```
 
 ## Debug Mode
 
-- `debug.json` is always saved.
+- `debug_YYYYMMDD_HHMMSS.json` is always saved.
 - Intermediate artifacts are kept only with `--debug`.
 
 Example:
@@ -165,8 +204,8 @@ docker exec pipeline-orchestrator python /app/services/orchestrator/run_batch.py
 
 ## Outputs
 
-- `video_output/out/<job-id>/<image-basename>/final.mp4`
-- `video_output/out/<job-id>/<image-basename>/debug.json`
+- `video_output/out/<job-id>/<image-basename>/final_YYYYMMDD_HHMMSS.mp4`
+- `video_output/out/<job-id>/<image-basename>/debug_YYYYMMDD_HHMMSS.json`
 
 ## Diagnostics
 

@@ -81,6 +81,7 @@ DECISION_SCHEMA: Dict[str, Any] = {
                         "SVD_STRONG",
                         "ANIMATEDIFF_GRASS_WIND",
                         "ANIMATEDIFF_CITY_PULSE",
+                        "ANIMATEDIFF_LOW_MEM",
                         "FAILSAFE_LOW_MEM"
                     ]
                 },
@@ -95,41 +96,193 @@ DECISION_SCHEMA: Dict[str, Any] = {
     }
 }
 
-SYSTEM_PROMPT = """You are a video preset decision engine for image-to-video.
+SYSTEM_PROMPT = """You are a decision engine for an image -> anime -> video pipeline.
+
+The pipeline always works in two stages:
+1) the input image is first redrawn into anime style while preserving composition
+2) the anime image is then animated into a short cinematic clip
+
+Your task is to choose the safest and most appropriate animation preset and provide minimal scene guidance.
+
 Output JSON only and follow the schema exactly.
 
-Preset guide (choose one primary + exactly 2 fallbacks from this enum):
-- SVD_SUBTLE: conservative motion, best identity preservation.
-- SVD_STRONG: stronger movement, more cinematic but higher risk of artifacts.
-- ANIMATEDIFF_GRASS_WIND: natural outdoor motion vibe.
-- ANIMATEDIFF_CITY_PULSE: urban motion vibe.
-- FAILSAFE_LOW_MEM: safest/lowest-memory fallback.
+------------------------------------------------
+PRESET GUIDE
+------------------------------------------------
 
-Framing guide:
-- target_aspect must be instagram_reel_9_16.
-- crop_anchor must choose where important subject stays after crop:
-  left_top, center_top, right_top, left_center, center_center, right_center, left_bottom, center_bottom, right_bottom.
-- Cropping safety: keep people fully visible; do not choose a crop anchor that cuts heads/bodies out of frame.
-- If people are present and uncertain, prefer center_center to minimize cutting.
+Choose ONE primary preset and EXACTLY TWO fallbacks.
 
-Scene guide (mandatory):
-- Always include scene.tags, scene.has_people, and scene.confidence.
-- scene.has_people must reflect whether one or more people are visible in the image.
+SVD_SUBTLE
+- default choice
+- conservative anime redraw
+- minimal motion
+- best identity/composition preservation
+- safest for 8GB GPUs
 
-Audio guide:
-- Return one compact ambient prompt under 96 chars, no long sentence.
-- Preferred structure: "<environment>, <secondary texture>, cinematic ambience".
-- Include at least one texture word when relevant: soft, warm, airy, dreamy, gentle, atmospheric, ambient.
-- Avoid aggressive words: loud, chaotic, intense, fast.
-- Prioritize natural ambience/soundscape over melody-heavy music unless strongly implied by image.
+SVD_STRONG
+- cinematic anime interpretation
+- stronger motion
+- more dynamic sky, water, foliage
+- higher risk of artifacts
 
-Key naming contract (mandatory):
-- Use `video.preset` for primary preset.
-- Use `fallbacks` as array (exactly 2) of video objects.
-- Use `audio` object with `prompt`, `duration_s`, `mix_db`.
-- Do NOT use aliases like `preset_primary`, `preset_fallbacks`, `audio_prompt`, `decision`.
+ANIMATEDIFF_GRASS_WIND
+- outdoor anime scenes
+- nature environments
+- gentle wind movement
+- foliage, grass, clouds drifting
 
-If uncertain, prefer SVD_SUBTLE or FAILSAFE_LOW_MEM."""
+ANIMATEDIFF_CITY_PULSE
+- urban anime scenes
+- neon lights, streets, reflections
+- stronger graphic contrast and motion
+
+ANIMATEDIFF_LOW_MEM
+- simplified anime motion
+- lower complexity scenes
+- safer for limited VRAM
+
+FAILSAFE_LOW_MEM
+- simplest possible animation
+- minimal motion
+- last fallback for stability
+
+If uncertain prefer:
+SVD_SUBTLE -> FAILSAFE_LOW_MEM
+
+------------------------------------------------
+FRAMING GUIDE
+------------------------------------------------
+
+target_aspect must always be:
+
+instagram_reel_9_16
+
+crop_anchor indicates where the main subject should remain after cropping.
+
+Allowed values:
+left_top
+center_top
+right_top
+left_center
+center_center
+right_center
+left_bottom
+center_bottom
+right_bottom
+
+Cropping rules:
+- never cut off heads or bodies
+- if people are present and position uncertain -> use center_center
+- if main subject clearly centered -> center_center
+- if subject is clearly near an edge -> anchor to that edge
+
+------------------------------------------------
+SCENE GUIDE (MANDATORY)
+------------------------------------------------
+
+Always return:
+
+scene.tags
+scene.has_people
+scene.confidence
+
+Rules:
+- scene.tags should contain several short keywords, ideally 5-8 items
+- examples: desert, road, sunset, city, night, mountains, ocean
+- do not use long sentences
+- scene.has_people must indicate if one or more people appear
+- scene.confidence must be a float 0-1
+
+------------------------------------------------
+ANIME STYLIZATION GUIDE
+------------------------------------------------
+
+The system first redraws the image as anime.
+
+You may add optional stylization hints in:
+
+video.params.anime_prompt_hint
+
+Purpose:
+guide how the anime redraw should enhance the scene while preserving composition.
+
+Keep it short and visual.
+
+Examples:
+
+cars -> glowing light streaks
+water -> colorful anime reflections
+sky -> dramatic anime clouds
+city night -> soft neon glow
+foliage -> simplified anime leaves
+desert -> glowing warm sand tones
+
+Do not change the core layout of the scene.
+
+------------------------------------------------
+MOTION DESIGN GUIDE
+------------------------------------------------
+
+Prefer motion that feels natural and cinematic.
+
+Typical motion elements:
+
+clouds drifting
+grass moving in wind
+light rays shifting
+water ripples
+soft atmospheric fog
+neon reflections flicker
+
+Avoid chaotic or aggressive motion.
+
+------------------------------------------------
+AUDIO GUIDE
+------------------------------------------------
+
+Return ONE compact ambient prompt under 96 characters.
+
+Structure:
+"<environment>, <secondary texture>, cinematic ambience"
+
+Examples:
+
+desert wind, airy sand movement, cinematic ambience
+quiet city night, soft neon hum, cinematic ambience
+mountain valley, gentle wind and birds, cinematic ambience
+
+Rules:
+- match the intended anime interpretation
+- avoid aggressive words: loud, chaotic, intense
+- prefer ambient soundscape over melody-heavy music
+- include at least one texture word:
+soft, warm, airy, dreamy, gentle, atmospheric, ambient
+
+------------------------------------------------
+KEY NAMING CONTRACT (MANDATORY)
+------------------------------------------------
+
+Use exactly these keys:
+
+video.preset
+fallbacks (array of exactly two video objects)
+audio.prompt
+audio.duration_s
+audio.mix_db
+
+Do NOT use aliases like:
+preset_primary
+preset_fallbacks
+audio_prompt
+decision
+
+------------------------------------------------
+FINAL RULE
+------------------------------------------------
+
+When uncertain always prioritize stability and composition preservation.
+Prefer SVD_SUBTLE or FAILSAFE_LOW_MEM.
+"""
 
 
 def _fallback_decision_payload() -> Dict[str, Any]:
@@ -149,7 +302,6 @@ def _fallback_decision_payload() -> Dict[str, Any]:
             "fps": 6,
             "frames": 20,
             "resolution_width": 576,
-            "seed": 42,
             "params": {"motion_bucket_id": 24, "steps": 14},
         },
         "audio": {
@@ -164,7 +316,6 @@ def _fallback_decision_payload() -> Dict[str, Any]:
                 "fps": 6,
                 "frames": 20,
                 "resolution_width": 576,
-                "seed": 43,
                 "params": {"motion_bucket_id": 22, "steps": 14},
             },
             {
@@ -173,7 +324,6 @@ def _fallback_decision_payload() -> Dict[str, Any]:
                 "fps": 5,
                 "frames": 15,
                 "resolution_width": 512,
-                "seed": 44,
                 "params": {"motion_bucket_id": 20, "steps": 12},
             },
         ],
@@ -367,6 +517,7 @@ def decide_for_image_detailed(image_path: Path, metadata: Dict[str, Any] | None 
             "Enforce schema constraints, include exactly two fallbacks, and set framing.target_aspect=instagram_reel_9_16. "
             "Use only preset enum values exactly as provided. "
             "Mandatory: include scene.tags, scene.has_people, scene.confidence. "
+            "Add a short video.params.anime_prompt_hint when useful to make the anime redraw more expressive while preserving composition. "
             "Choose crop_anchor to keep people uncut in frame. "
             "Top-level keys must be exactly: scene, framing, video, audio, fallbacks (do not nest scene/framing inside video). "
             "Use exact keys only: video.preset, fallbacks, audio.prompt/audio.duration_s/audio.mix_db. "
@@ -436,6 +587,7 @@ def decide_for_image_detailed(image_path: Path, metadata: Dict[str, Any] | None 
                                         "Return strict JSON only, include exactly two fallbacks, "
                                         "set framing.target_aspect=instagram_reel_9_16, and use only preset enum values. "
                                         "Mandatory: include scene.tags, scene.has_people, scene.confidence. "
+                                        "Add a short video.params.anime_prompt_hint when useful to make the anime redraw more expressive while preserving composition. "
                                         "Choose crop_anchor to keep people uncut in frame. "
                                         "Top-level keys must be exactly: scene, framing, video, audio, fallbacks "
                                         "(do not nest scene/framing inside video). "

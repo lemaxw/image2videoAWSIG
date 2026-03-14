@@ -21,5 +21,11 @@ RUN git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.
          pip install --no-cache-dir -r /opt/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt; \
        fi
 
+# AnimateDiff Evolved
+RUN git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-AnimateDiff-Evolved.git /opt/ComfyUI/custom_nodes/ComfyUI-AnimateDiff-Evolved \
+    && if [ -f /opt/ComfyUI/custom_nodes/ComfyUI-AnimateDiff-Evolved/requirements.txt ]; then \
+         pip install --no-cache-dir -r /opt/ComfyUI/custom_nodes/ComfyUI-AnimateDiff-Evolved/requirements.txt; \
+       fi
+              
 EXPOSE 8188
 CMD ["python", "main.py", "--listen", "0.0.0.0", "--port", "8188", "--output-directory", "/data/outputs/comfy", "--cpu"]

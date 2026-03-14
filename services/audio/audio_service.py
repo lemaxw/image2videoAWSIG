@@ -47,8 +47,13 @@ def _load_backend():
 
     device_name = os.environ.get("AUDIO_DEVICE", "cpu")
     dtype = torch.float16 if device_name == "cuda" else torch.float32
-    logger.info("audio.backend.init backend=audioldm device=%s dtype=%s", device_name, str(dtype))
-    _PIPE = AudioLDMPipeline.from_pretrained("cvssp/audioldm-s-full-v2", torch_dtype=dtype)
+    cache_dir = os.environ.get("AUDIO_CACHE_DIR", "/cache")
+    logger.info("audio.backend.init backend=audioldm device=%s dtype=%s cache_dir=%s", device_name, str(dtype), cache_dir)
+    _PIPE = AudioLDMPipeline.from_pretrained(
+        "cvssp/audioldm-s-full-v2",
+        torch_dtype=dtype,
+        cache_dir=cache_dir,
+    )
     _PIPE = _PIPE.to(device_name)
     return _PIPE
 
@@ -147,7 +152,8 @@ def _prepare_audio_array(audio: object) -> np.ndarray:
 def _postprocess_with_ffmpeg(input_wav: Path, output_wav: Path, duration_s: int) -> None:
     if not input_wav.exists() or input_wav.stat().st_size < 64:
         raise RuntimeError(f"ffmpeg input wav missing or too small: {input_wav}")
-    target_lufs = _env_float("AUDIO_TARGET_LUFS", -16.0)
+    # Slightly louder default so short ambience remains audible after muxing.
+    target_lufs = _env_float("AUDIO_TARGET_LUFS", -14.0)
     true_peak = _env_float("AUDIO_TRUE_PEAK_DB", -1.0)
     # ffmpeg alimiter.limit expects linear gain (0.0625..1.0), not dB.
     alimiter_limit = max(0.0625, min(1.0, float(10 ** (true_peak / 20.0))))

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+from datetime import datetime
 import json
 import logging
 import os
@@ -19,7 +20,7 @@ if __package__ is None or __package__ == "":
         sys.path.insert(0, str(repo_root))
 
 from services.decision.decision_service import decide_for_image_detailed
-from services.orchestrator.comfy_client import ComfyClient, find_latest_mp4
+from services.orchestrator.comfy_client import ComfyClient, find_latest_image, find_latest_mp4
 from services.orchestrator.mux import mux_video_audio
 from services.orchestrator.validate import validate_and_clamp_decision
 
@@ -30,7 +31,6 @@ DEFAULT_VIDEO_OVERRIDES: Dict[str, Any] = {
     "resolution_width": 768,
     "steps": 24,
     "motion_bucket_id": 24,
-    "seed": 123,
 }
 
 
@@ -139,16 +139,27 @@ def _resolve_comfy_url(initial_url: str) -> str:
 
 
 def _build_workflow(comfy: ComfyClient, templates_root: Path, local_input: Path, output_prefix: str, video_cfg: Dict[str, Any]) -> Dict[str, Any]:
-    preset = video_cfg["preset"]
-    if preset.startswith("SVD") or preset == "FAILSAFE_LOW_MEM":
-        return comfy.build_svd_workflow(
-            templates_root / "svd_workflow.json",
-            input_image=str(local_input),
-            output_prefix=output_prefix,
-            decision_video=video_cfg,
-        )
+    return comfy.build_svd_workflow(
+        templates_root / "svd_workflow.json",
+        input_image=str(local_input),
+        output_prefix=output_prefix,
+        decision_video=video_cfg,
+    )
+
+
+def _build_legacy_animatediff_workflow(comfy: ComfyClient, templates_root: Path, local_input: Path, output_prefix: str, video_cfg: Dict[str, Any]) -> Dict[str, Any]:
     return comfy.build_animatediff_workflow(
         templates_root / "animatediff_workflow.json",
+        input_image=str(local_input),
+        output_prefix=output_prefix,
+        decision_video=video_cfg,
+    )
+
+
+def _build_anime_redraw_workflow(comfy: ComfyClient, templates_root: Path, local_input: Path, output_prefix: str, video_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    return comfy.build_anime_redraw_workflow(
+        templates_root / "anime_redraw_workflow.json",
+        input_image=str(local_input),
         output_prefix=output_prefix,
         decision_video=video_cfg,
     )
@@ -209,6 +220,11 @@ def _propagate_target_aspect(decision: Dict[str, Any]) -> None:
             params = cfg.get("params") or {}
             params["target_aspect"] = target_aspect
             cfg["params"] = params
+
+
+def _is_oom_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "out of memory" in text or "would exceed allowed memory" in text or "torch.outofmemoryerror" in text
 
 
 def _crop_anchor_offsets(anchor: str) -> tuple[float, float]:
@@ -272,7 +288,7 @@ def _prepare_instagram_input_image(source_path: Path, out_dir: Path, framing: Di
 
 def _cleanup_intermediates(local_case_dir: Path, render_input: Path, source_input: Path, attempt: Dict[str, Any] | None) -> None:
     if attempt:
-        for k in ("video_path", "audio_path"):
+        for k in ("video_path", "audio_path", "anime_image_path"):
             p = attempt.get(k)
             if p:
                 try:
@@ -313,6 +329,7 @@ def process_one_image(
     debug: Dict[str, Any] = {"input_key": input_key, "job_id": job_id, "attempts": [], "timings": {}, "status": "failed", "error": None}
     last_attempt: Dict[str, Any] | None = None
     render_input = local_input
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     try:
         _log("info", "image.start", job_id=job_id, input_key=input_key)
@@ -355,17 +372,68 @@ def process_one_image(
         final_mux: Path | None = None
         workflow_used: Dict[str, Any] | None = None
 
-        for idx, video_cfg in enumerate(video_candidates):
+        idx = 0
+        while idx < len(video_candidates):
+            video_cfg = video_candidates[idx]
             attempt = {"index": idx, "video": video_cfg, "status": "started"}
             last_attempt = attempt
             t_render_start = time.time()
             _log("info", "image.render.attempt.start", job_id=job_id, input_key=input_key, attempt_index=idx, preset=video_cfg.get("preset"))
             try:
+                output_root = Path(os.environ.get("OUTPUT_DIR", "/data/outputs"))
+                stage_input = render_input
+                anime_prompt_id: str | None = None
+                anime_workflow: Dict[str, Any] | None = None
+                workflow: Dict[str, Any]
+                prompt_id: str
+
                 t_workflow_build = time.time()
-                workflow = _build_workflow(
+                _log(
+                    "info",
+                    "image.render.anime.start",
+                    job_id=job_id,
+                    input_key=input_key,
+                    attempt_index=idx,
+                    preset=video_cfg.get("preset"),
+                )
+                anime_workflow = _build_anime_redraw_workflow(
                     comfy,
                     templates_root=templates_root,
                     local_input=render_input,
+                    output_prefix=f"{job_id}-{image_name}-{idx}-anime",
+                    video_cfg=video_cfg,
+                )
+                attempt["anime_workflow_build_s"] = round(time.time() - t_workflow_build, 3)
+                t_submit = time.time()
+                anime_prompt_id = comfy.submit_workflow(anime_workflow)
+                attempt["anime_submit_s"] = round(time.time() - t_submit, 3)
+                t_wait = time.time()
+                anime_hist = comfy.wait_for_prompt(anime_prompt_id)
+                attempt["anime_wait_s"] = round(time.time() - t_wait, 3)
+                anime_prefix = str((anime_workflow.get("8", {}).get("inputs", {}) or {}).get("filename_prefix", ""))
+                stage_input = find_latest_image(
+                    anime_hist,
+                    output_root,
+                    expected_prefix=anime_prefix,
+                )
+                _log(
+                    "info",
+                    "image.render.anime.done",
+                    job_id=job_id,
+                    input_key=input_key,
+                    attempt_index=idx,
+                    preset=video_cfg.get("preset"),
+                    anime_input=str(stage_input),
+                    prompt_id=anime_prompt_id,
+                )
+                attempt["anime_image_path"] = str(stage_input)
+                attempt["anime_prompt_id"] = anime_prompt_id
+                t_workflow_build = time.time()
+
+                workflow = _build_workflow(
+                    comfy,
+                    templates_root=templates_root,
+                    local_input=stage_input,
                     output_prefix=f"{job_id}-{image_name}-{idx}",
                     video_cfg=video_cfg,
                 )
@@ -376,7 +444,12 @@ def process_one_image(
                 t_wait = time.time()
                 hist = comfy.wait_for_prompt(prompt_id)
                 attempt["comfy_wait_s"] = round(time.time() - t_wait, 3)
-                video_path = find_latest_mp4(hist, Path(os.environ.get("OUTPUT_DIR", "/data/outputs")))
+                expected_prefix = str((workflow.get("13", {}).get("inputs", {}) or {}).get("filename_prefix", ""))
+                video_path = find_latest_mp4(
+                    hist,
+                    output_root,
+                    expected_prefix=expected_prefix,
+                )
 
                 audio_cfg = decision["audio"]
                 shared_output_root = Path(os.environ.get("OUTPUT_DIR", "/data/outputs"))
@@ -389,7 +462,8 @@ def process_one_image(
                 audio_path = Path(audio_info["wav_path"])
                 _log("info", "image.audio.done", job_id=job_id, input_key=input_key, attempt_index=idx, backend=attempt["audio_backend"], wav_path=str(audio_path), duration_s=attempt["audio_generate_s"])
 
-                final_mux = local_case_dir / "final.mp4"
+                final_name = f"final_{run_timestamp}.mp4"
+                final_mux = local_case_dir / final_name
                 t_mux = time.time()
                 mux_video_audio(video_path=video_path, audio_path=audio_path, output_path=final_mux, mix_db=audio_cfg["mix_db"])
                 attempt["mux_s"] = round(time.time() - t_mux, 3)
@@ -399,7 +473,10 @@ def process_one_image(
                 attempt["render_s"] = round(time.time() - t_render_start, 3)
                 attempt["status"] = "success"
                 debug["attempts"].append(attempt)
-                workflow_used = workflow
+                workflow_used = {
+                    "anime_redraw_workflow": anime_workflow,
+                    "video_workflow": workflow,
+                } if anime_workflow else workflow
                 _log("info", "image.render.attempt.done", job_id=job_id, input_key=input_key, attempt_index=idx, status="success", duration_s=attempt["render_s"], preset=video_cfg.get("preset"), prompt_id=prompt_id)
                 break
             except Exception as exc:
@@ -409,6 +486,9 @@ def process_one_image(
                 attempt["render_s"] = round(time.time() - t_render_start, 3)
                 debug["attempts"].append(attempt)
                 _log("error", "image.render.attempt.failed", job_id=job_id, input_key=input_key, attempt_index=idx, status="failed", duration_s=attempt["render_s"], preset=video_cfg.get("preset"), error=str(exc), error_type=exc.__class__.__name__)
+                if _is_oom_error(exc):
+                    raise RuntimeError(f"Render aborted on OOM: preset={video_cfg.get('preset')} error={exc}") from exc
+            idx += 1
 
         if final_mux is None or not final_mux.exists():
             raise RuntimeError("All render attempts failed")
@@ -417,12 +497,13 @@ def process_one_image(
         debug["status"] = "success"
         debug["timings"]["total_s"] = round(time.time() - start_t, 3)
 
-        final_key = f"{output_prefix.rstrip('/')}/{job_id}/{image_name}/final.mp4"
-        debug_key = f"{output_prefix.rstrip('/')}/{job_id}/{image_name}/debug.json"
+        final_key = f"{output_prefix.rstrip('/')}/{job_id}/{image_name}/{final_mux.name}"
+        debug_name = f"debug_{run_timestamp}.json"
+        debug_key = f"{output_prefix.rstrip('/')}/{job_id}/{image_name}/{debug_name}"
         io.write_output(final_mux, final_key)
         debug["timings"]["upload_video_s"] = 0.0
 
-        debug_path = local_case_dir / "debug.json"
+        debug_path = local_case_dir / debug_name
         debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
         io.write_output(debug_path, debug_key)
         debug["timings"]["upload_debug_s"] = 0.0
@@ -437,9 +518,10 @@ def process_one_image(
         debug["error"] = str(exc)
         debug["error_type"] = exc.__class__.__name__
         debug["timings"]["total_s"] = round(time.time() - start_t, 3)
-        debug_path = local_case_dir / "debug.json"
+        debug_name = f"debug_{run_timestamp}.json"
+        debug_path = local_case_dir / debug_name
         debug_path.write_text(json.dumps(debug, indent=2), encoding="utf-8")
-        debug_key = f"{output_prefix.rstrip('/')}/{job_id}/{image_name}/debug.json"
+        debug_key = f"{output_prefix.rstrip('/')}/{job_id}/{image_name}/{debug_name}"
         io.write_output(debug_path, debug_key)
         _log("error", "image.done", job_id=job_id, input_key=input_key, status="failed", total_s=debug["timings"]["total_s"], error=str(exc), error_type=exc.__class__.__name__)
         if not debug_enabled:
@@ -472,7 +554,7 @@ def main() -> int:
         parsed = json.loads(args.video_params_json)
         if not isinstance(parsed, dict):
             raise ValueError("--video-params-json must be a JSON object")
-        video_overrides.update(parsed)
+        video_overrides = parsed
     _log("info", "video.overrides", job_id=args.job_id, overrides=video_overrides)
 
     io = LocalIO(input_dir=input_dir, output_dir=output_dir)

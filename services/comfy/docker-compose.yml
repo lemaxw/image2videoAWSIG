@@ -10,7 +10,7 @@ services:
     ports:
       - "127.0.0.1:8188:8188"
     volumes:
-      - ${MODEL_DIR:-/data/models}:/opt/ComfyUI/models
+      - ${MODEL_DIR:-/data/models}:/opt/ComfyUI/models      
       - ${OUTPUT_DIR:-/data/outputs}:/data/outputs
       - shared_inputs:/data/inputs
       - ./workflow_templates:/app/workflow_templates:ro
