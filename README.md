@@ -31,6 +31,23 @@ Local-only image-to-video pipeline (no AWS/S3/AMI/infra flow).
   - Loads local images, calls decision service, crops input for IG 9:16,
     renders with Comfy, generates audio, muxes final mp4, writes `debug.json`.
 
+## Flow
+
+```mermaid
+flowchart LR
+    A[Local input image<br/>video_input/] --> B[orchestrator<br/>run_batch.py]
+    B --> C[decision service<br/>scene framing audio plan]
+    B --> D[local crop<br/>IG 9:16]
+    C --> B
+    D --> E[ComfyUI stage A<br/>anime redraw still]
+    E --> F[ComfyUI stage B<br/>SVD img2vid]
+    C --> G[audio service<br/>generate WAV]
+    F --> H[mux video + audio]
+    G --> H
+    H --> I[final MP4<br/>video_output/out/...]
+    B --> J[debug JSON<br/>always saved]
+```
+
 ## Prerequisites
 
 - Docker + Docker Compose plugin
@@ -86,7 +103,6 @@ Current model selection:
   - stage B: SVD video generation from the anime still
 - Core video model: `svd_xt.safetensors`
 - Core anime redraw fallback model: `v1-5-pruned-emaonly-fp16.safetensors`
-- The old AnimateDiff motion module is no longer used by the active pipeline
 - If available, anime redraw presets prefer:
   - `meinamix_v11.safetensors`
   - `counterfeit_v30.safetensors`
@@ -157,9 +173,26 @@ docker compose --env-file $(pwd)/.env \
 ## Run Batch
 
 ```bash
-docker exec pipeline-orchestrator python /app/services/orchestrator/run_batch.py \
+docker compose --env-file $(pwd)/.env \
+  -f services/comfy/docker-compose.yml \
+  -f services/comfy/docker-compose.gpu.yml \
+  exec -T orchestrator python /app/services/orchestrator/run_batch.py \
   --job-id dry-001 \
   --input-prefix . \
+  --output-prefix out \
+  --local-input-dir /data/local_inputs \
+  --local-output-dir /data/local_outputs
+```
+
+Run exactly one file:
+
+```bash
+docker compose --env-file $(pwd)/.env \
+  -f services/comfy/docker-compose.yml \
+  -f services/comfy/docker-compose.gpu.yml \
+  exec -T orchestrator python /app/services/orchestrator/run_batch.py \
+  --job-id dry-001 \
+  --input-file _MG_6609.jpg \
   --output-prefix out \
   --local-input-dir /data/local_inputs \
   --local-output-dir /data/local_outputs
@@ -185,13 +218,13 @@ Available video presets:
 
 Preset behavior:
 - Every preset renders an anime still first, then runs SVD img2vid
-- `SVD_SUBTLE`: gentlest anime redraw + conservative motion
-- `SVD_STRONG`: stronger anime redraw + stronger SVD motion
-- `ANIMATEDIFF_GRASS_WIND`: outdoor/nature anime styling profile
-- `ANIMATEDIFF_CITY_PULSE`: urban/night/reflections anime styling profile
+- `SVD_SUBTLE`: gentlest anime redraw profile
+- `SVD_STRONG`: stronger anime redraw profile
+- `ANIMATEDIFF_GRASS_WIND`: outdoor/nature styling profile
+- `ANIMATEDIFF_CITY_PULSE`: urban/night/reflections styling profile
 - `ANIMATEDIFF_LOW_MEM`: simplified anime styling profile
-- `FAILSAFE_LOW_MEM`: safest anime styling + motion fallback
-- Preset names now act as style/motion profiles, not as separate backend families
+- `FAILSAFE_LOW_MEM`: safest anime styling fallback
+- Preset names act as styling profiles, not separate backend families
 
 Override at runtime:
 
@@ -200,6 +233,14 @@ Override at runtime:
 ```
 
 When `--video-params-json` is provided, only the keys you pass are overridden. It does not merge with the default override block.
+
+Add extra animation or styling directions at runtime:
+
+```bash
+--animation-directions "subtle hair movement, gentle camera drift, breeze through clothing"
+```
+
+You can also pass the same idea through JSON using either `anime_prompt_hint` or `animation_directions`.
 
 Force simplified low-memory style profile:
 
@@ -215,7 +256,10 @@ Force simplified low-memory style profile:
 Example:
 
 ```bash
-docker exec pipeline-orchestrator python /app/services/orchestrator/run_batch.py \
+docker compose --env-file $(pwd)/.env \
+  -f services/comfy/docker-compose.yml \
+  -f services/comfy/docker-compose.gpu.yml \
+  exec -T orchestrator python /app/services/orchestrator/run_batch.py \
   --job-id dry-001 \
   --input-prefix . \
   --output-prefix out \

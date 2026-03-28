@@ -34,6 +34,22 @@ DEFAULT_VIDEO_OVERRIDES: Dict[str, Any] = {
 }
 
 
+def _merge_animation_directions(overrides: Dict[str, Any], animation_directions: str) -> Dict[str, Any]:
+    extra = " ".join(str(animation_directions or "").split()).strip()
+    if not extra:
+        return overrides
+
+    merged = dict(overrides)
+    existing = " ".join(
+        str(merged.get(key, "")).strip()
+        for key in ("anime_prompt_hint", "animation_directions")
+        if str(merged.get(key, "")).strip()
+    ).strip()
+    merged["anime_prompt_hint"] = f"{existing}, {extra}" if existing else extra
+    merged.pop("animation_directions", None)
+    return merged
+
+
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload = {
@@ -69,6 +85,8 @@ class LocalIO:
         root = self.input_dir / prefix if prefix and prefix != "." else self.input_dir
         if not root.exists():
             return []
+        if root.is_file() and root.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+            return [str(root.relative_to(self.input_dir))]
         return sorted(
             str(p.relative_to(self.input_dir))
             for p in root.rglob("*")
@@ -532,13 +550,15 @@ def process_one_image(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run image->video batch orchestrator (local-only)")
     parser.add_argument("--job-id", required=True)
-    parser.add_argument("--input-prefix", required=True)
+    parser.add_argument("--input-prefix", default=".", help="Directory prefix under local input dir, or '.' for all files.")
+    parser.add_argument("--input-file", default="", help="Process exactly one input file relative to --local-input-dir.")
     parser.add_argument("--output-prefix", required=True)
     parser.add_argument("--max-fail-ratio", type=float, default=0.3)
     parser.add_argument("--local-input-dir", required=True)
     parser.add_argument("--local-output-dir", required=True)
     parser.add_argument("--debug", action="store_true", help="Keep intermediate artifacts (cropped image, temp case dir, comfy/audio intermediates).")
     parser.add_argument("--video-params-json", default="", help="JSON object of runtime video overrides.")
+    parser.add_argument("--animation-directions", default="", help="Additional animation/style directions appended to the anime redraw prompt.")
     args = parser.parse_args()
 
     input_dir = Path(args.local_input_dir).resolve()
@@ -555,6 +575,7 @@ def main() -> int:
         if not isinstance(parsed, dict):
             raise ValueError("--video-params-json must be a JSON object")
         video_overrides = parsed
+    video_overrides = _merge_animation_directions(video_overrides, args.animation_directions)
     _log("info", "video.overrides", job_id=args.job_id, overrides=video_overrides)
 
     io = LocalIO(input_dir=input_dir, output_dir=output_dir)
@@ -566,9 +587,15 @@ def main() -> int:
     _log("info", "service.endpoint.selected", service="comfy", url=comfy.base_url)
     _wait_http_ok(f"{audio_url}/health", timeout_s=30, label="audio")
 
-    image_keys = io.list_images(args.input_prefix)
+    if args.input_file:
+        image_keys = io.list_images(args.input_file)
+    else:
+        image_keys = io.list_images(args.input_prefix)
     if not image_keys:
-        logger.warning("no images found", extra={"extra": {"prefix": args.input_prefix}})
+        logger.warning(
+            "no images found",
+            extra={"extra": {"prefix": args.input_prefix, "input_file": args.input_file}},
+        )
         return 0
 
     failures = 0

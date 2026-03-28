@@ -102,6 +102,15 @@ def _compose_anime_prompt(preset: str, scene: Dict[str, Any], current_prompt: st
     return f"{combined}{people_guard}"[:240]
 
 
+def _merge_prompt_hints(*parts: Any) -> str:
+    merged: List[str] = []
+    for part in parts:
+        text = " ".join(str(part or "").split()).strip()
+        if text:
+            merged.append(text)
+    return ", ".join(merged)[:160]
+
+
 def _motion_bucket_for_scene(scene: Dict[str, Any], preset: str, current_value: int) -> int:
     text = _scene_tags_text(scene)
     value = current_value
@@ -295,6 +304,7 @@ def _validate_video(video: Dict[str, Any]) -> Dict[str, Any]:
 
     # Clamp preset-specific parameters to safe execution ranges.
     if preset.startswith("SVD") or preset == "FAILSAFE_LOW_MEM":
+        prompt_hint = _merge_prompt_hints(params.get("anime_prompt_hint", ""), params.get("animation_directions", ""))
         motion_strength = clamp_int(params.get("motion_strength", 35), 10, 80)
         mapped_motion = clamp_int(int(round(motion_strength * 0.75)), 10, 80)
         v["params"] = {
@@ -312,7 +322,7 @@ def _validate_video(video: Dict[str, Any]) -> Dict[str, Any]:
                     "anime illustration, clean lineart, soft cel shading, preserve original composition",
                 )
             )[:240],
-            "anime_prompt_hint": str(params.get("anime_prompt_hint", ""))[:160],
+            "anime_prompt_hint": prompt_hint,
             "anime_negative_prompt": str(
                 params.get(
                     "anime_negative_prompt",
@@ -327,6 +337,7 @@ def _validate_video(video: Dict[str, Any]) -> Dict[str, Any]:
             "requested_preset": requested_preset,
         }
     else:
+        prompt_hint = _merge_prompt_hints(params.get("anime_prompt_hint", ""), params.get("animation_directions", ""))
         v["params"] = {
             "steps": clamp_int(params.get("steps", 18), 12, 24),
             "motion_bucket_id": clamp_int(params.get("motion_bucket_id", 18), 10, 32),
@@ -342,7 +353,7 @@ def _validate_video(video: Dict[str, Any]) -> Dict[str, Any]:
                     "anime illustration, clean lineart, soft cel shading, preserve original composition",
                 )
             )[:240],
-            "anime_prompt_hint": str(params.get("anime_prompt_hint", ""))[:160],
+            "anime_prompt_hint": prompt_hint,
             "anime_negative_prompt": str(
                 params.get(
                     "anime_negative_prompt",

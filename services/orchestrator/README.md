@@ -12,7 +12,9 @@ Entry point: `services/orchestrator/run_batch.py`
 
 ## Optional args
 
+- `--input-file` process exactly one file relative to `--local-input-dir`
 - `--video-params-json` (JSON object)
+- `--animation-directions` append extra animation/style directions to the anime redraw prompt
 - `--debug` keep intermediate artifacts
 - `--max-fail-ratio` (default `0.3`)
 
@@ -33,7 +35,7 @@ Every preset now runs the same two-stage flow:
 1. input image -> anime redraw still
 2. anime still -> SVD img2vid
 
-Preset names act as style/motion profiles, not separate backends.
+Preset names act as styling profiles, not separate backends.
 
 ## Example
 
@@ -45,3 +47,28 @@ python /app/services/orchestrator/run_batch.py \
   --local-input-dir /data/local_inputs \
   --local-output-dir /data/local_outputs
 ```
+
+Single file example:
+
+```bash
+python /app/services/orchestrator/run_batch.py \
+  --job-id dry-001 \
+  --input-file _MG_6609.jpg \
+  --output-prefix out \
+  --local-input-dir /data/local_inputs \
+  --local-output-dir /data/local_outputs
+```
+
+Example with extra animation directions:
+
+```bash
+python /app/services/orchestrator/run_batch.py \
+  --job-id dry-001 \
+  --input-file _MG_6609.jpg \
+  --output-prefix out \
+  --local-input-dir /data/local_inputs \
+  --local-output-dir /data/local_outputs \
+  --animation-directions "subtle hair movement, gentle camera drift, breeze through clothing"
+```
+
+JSON override users can also pass `anime_prompt_hint` or `animation_directions` inside `--video-params-json`.
