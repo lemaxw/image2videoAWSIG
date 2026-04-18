@@ -262,13 +262,13 @@ soft, warm, airy, dreamy, gentle, atmospheric, ambient
 KEY NAMING CONTRACT (MANDATORY)
 ------------------------------------------------
 
-Use exactly these keys:
+Use exactly this object shape:
 
-video.preset
-fallbacks (array of exactly two video objects)
-audio.prompt
-audio.duration_s
-audio.mix_db
+video: { preset, duration_s, fps, frames, resolution_width, seed, params }
+audio: { prompt, duration_s, mix_db }
+framing: { target_aspect, crop_anchor }
+scene: { tags, has_people, confidence }
+fallbacks: array of exactly two video objects
 
 Do NOT use aliases like:
 preset_primary
@@ -396,6 +396,37 @@ def _truncate(text: str, limit: int = 4000) -> str:
     return text[:limit] + "...<truncated>"
 
 
+def _normalize_prefixed_object(container: Dict[str, Any], prefix: str) -> Dict[str, Any]:
+    obj = container.get(prefix)
+    if not isinstance(obj, dict):
+        obj = {}
+    else:
+        obj = dict(obj)
+
+    dotted_prefix = f"{prefix}."
+    normalized = {k: v for k, v in obj.items() if not (isinstance(k, str) and k.startswith(dotted_prefix))}
+    for key, value in obj.items():
+        if isinstance(key, str) and key.startswith(dotted_prefix):
+            normalized.setdefault(key[len(dotted_prefix):], value)
+    for key, value in list(container.items()):
+        if isinstance(key, str) and key.startswith(dotted_prefix):
+            normalized.setdefault(key[len(dotted_prefix):], value)
+    return normalized
+
+
+def _normalize_fallback_item(item: Any) -> Any:
+    if not isinstance(item, dict):
+        return item
+    normalized = dict(item)
+    if isinstance(normalized.get("video"), dict):
+        inner_video = dict(normalized["video"])
+        inner_video.update(_normalize_prefixed_object(normalized, "video"))
+        normalized["video"] = inner_video
+    elif any(isinstance(key, str) and key.startswith("video.") for key in normalized):
+        normalized = _normalize_prefixed_object(normalized, "video")
+    return normalized
+
+
 def _coerce_decision_shape(parsed: Dict[str, Any]) -> Dict[str, Any]:
     # Some chat-completions responses return a shorthand shape:
     # {"preset":"...", "fallbacks":["...","..."], "audio": {...}, "framing": {...}}
@@ -405,6 +436,13 @@ def _coerce_decision_shape(parsed: Dict[str, Any]) -> Dict[str, Any]:
     nested = parsed.get("decision")
     if isinstance(nested, dict):
         parsed = nested
+    parsed = dict(parsed)
+    parsed["video"] = _normalize_prefixed_object(parsed, "video")
+    parsed["audio"] = _normalize_prefixed_object(parsed, "audio")
+    parsed["framing"] = _normalize_prefixed_object(parsed, "framing")
+    parsed["scene"] = _normalize_prefixed_object(parsed, "scene")
+    if isinstance(parsed.get("fallbacks"), list):
+        parsed["fallbacks"] = [_normalize_fallback_item(item) for item in parsed["fallbacks"]]
     if "video" in parsed and "scene" in parsed and "audio" in parsed and "fallbacks" in parsed:
         return parsed
 
@@ -520,7 +558,8 @@ def decide_for_image_detailed(image_path: Path, metadata: Dict[str, Any] | None 
             "Add a short video.params.anime_prompt_hint when useful to make the anime redraw more expressive while preserving composition. "
             "Choose crop_anchor to keep people uncut in frame. "
             "Top-level keys must be exactly: scene, framing, video, audio, fallbacks (do not nest scene/framing inside video). "
-            "Use exact keys only: video.preset, fallbacks, audio.prompt/audio.duration_s/audio.mix_db. "
+            "Use nested object fields only: video.preset means the `preset` field inside the `video` object, "
+            "and audio.prompt/audio.duration_s/audio.mix_db are fields inside the `audio` object. "
             "Do not use alias keys like preset_primary, preset_fallbacks, audio_prompt, decision."
         ),
     }
@@ -591,7 +630,8 @@ def decide_for_image_detailed(image_path: Path, metadata: Dict[str, Any] | None 
                                         "Choose crop_anchor to keep people uncut in frame. "
                                         "Top-level keys must be exactly: scene, framing, video, audio, fallbacks "
                                         "(do not nest scene/framing inside video). "
-                                        "Use exact keys only: video.preset, fallbacks, audio.prompt/audio.duration_s/audio.mix_db. "
+                                        "Use nested object fields only: video.preset means the `preset` field inside the `video` object, "
+                                        "and audio.prompt/audio.duration_s/audio.mix_db are fields inside the `audio` object. "
                                         "Do not use alias keys like preset_primary, preset_fallbacks, audio_prompt, decision."
                                     ),
                                 },

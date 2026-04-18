@@ -296,7 +296,7 @@ def _validate_video(video: Dict[str, Any]) -> Dict[str, Any]:
     v["fps"] = clamp_int(video.get("fps", params.get("fps", v.get("fps", 6))), 3, 10)
     requested_frames = video.get("frames", params.get("frames", v.get("frames", 20)))
     min_frames_for_duration = v["duration_s"] * v["fps"]
-    v["frames"] = clamp_int(max(int(requested_frames), min_frames_for_duration), 10, 25)
+    v["frames"] = clamp_int(max(int(requested_frames), min_frames_for_duration), 10, 35)
     v["resolution_width"] = _nearest_mult_64(
         clamp_int(video.get("resolution_width", params.get("resolution_width", v.get("resolution_width", 576))), 384, 768)
     )

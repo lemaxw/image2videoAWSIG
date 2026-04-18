@@ -203,7 +203,7 @@ docker compose --env-file $(pwd)/.env \
 Applied automatically when no explicit override is provided:
 
 ```json
-{"fps":5,"frames":25,"resolution_width":768,"steps":24,"motion_bucket_id":24}
+{"fps":7,"frames":35,"resolution_width":768,"steps":24}
 ```
 
 `seed` is auto-generated per run unless you pass it explicitly.
@@ -229,7 +229,7 @@ Preset behavior:
 Override at runtime:
 
 ```bash
---video-params-json '{"fps":5,"frames":25,"resolution_width":768,"steps":24,"motion_bucket_id":24,"crop_anchor":"center_center"}'
+--video-params-json '{"fps":7,"frames":35,"resolution_width":768,"steps":24,"crop_anchor":"center_center"}'
 ```
 
 When `--video-params-json` is provided, only the keys you pass are overridden. It does not merge with the default override block.

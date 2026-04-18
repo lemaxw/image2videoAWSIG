@@ -26,11 +26,10 @@ from services.orchestrator.validate import validate_and_clamp_decision
 
 
 DEFAULT_VIDEO_OVERRIDES: Dict[str, Any] = {
-    "fps": 5,
-    "frames": 25,
+    "fps": 7,
+    "frames": 35,
     "resolution_width": 768,
     "steps": 24,
-    "motion_bucket_id": 24,
 }
 
 

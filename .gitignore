@@ -1,13 +1,31 @@
-.terraform/
-*.tfstate
-*.tfstate.*
-.terraform.lock.hcl
+# Local environment
+.env
+.venv/
+.python-version
+
+# Python caches
 __pycache__/
 *.pyc
-.env
-*.log
-tmp/
-.video_input/
-.video_output/
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local runtime data and generated outputs
 .local/
-.venv/
+video_input/
+video_output/
+tmp/
+
+# Logs and debugging artifacts
+*.log
+*.pid
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+
+# Local Codex metadata
+.codex

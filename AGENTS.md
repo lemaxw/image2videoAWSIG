@@ -16,7 +16,7 @@ Read [README.md](/home/mpshater/hobby/image2videoAWSIG/README.md) first.
   - `--local-input-dir`
   - `--local-output-dir`
 - Default video params are applied automatically:
-  - `fps=5, frames=25, resolution_width=768, steps=24, motion_bucket_id=24`
+  - `fps=7, frames=35, resolution_width=768, steps=24`
   - `seed` is auto-generated unless explicitly provided.
 - `debug.json` is always saved.
 - Intermediate artifacts are only preserved with `--debug`.

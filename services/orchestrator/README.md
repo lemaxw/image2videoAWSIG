@@ -23,7 +23,7 @@ Entry point: `services/orchestrator/run_batch.py`
 Applied on every run (unless overridden by `--video-params-json`):
 
 ```json
-{"fps":5,"frames":25,"resolution_width":768,"steps":24,"motion_bucket_id":24}
+{"fps":7,"frames":35,"resolution_width":768,"steps":24}
 ```
 
 `seed` is auto-generated unless explicitly provided.
