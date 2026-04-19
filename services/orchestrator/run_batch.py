@@ -303,6 +303,13 @@ def _prepare_instagram_input_image(source_path: Path, out_dir: Path, framing: Di
     }
 
 
+def _export_jpeg(source_path: Path, output_path: Path, quality: int = 95) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(source_path) as img:
+        img = img.convert("RGB")
+        img.save(output_path, format="JPEG", quality=quality)
+
+
 def _cleanup_intermediates(local_case_dir: Path, render_input: Path, source_input: Path, attempt: Dict[str, Any] | None) -> None:
     if attempt:
         for k in ("video_path", "audio_path", "anime_image_path"):
@@ -515,9 +522,22 @@ def process_one_image(
         debug["timings"]["total_s"] = round(time.time() - start_t, 3)
 
         final_key = f"{output_prefix.rstrip('/')}/{job_id}/{image_name}/{final_mux.name}"
+        cropped_name = f"cropped_{run_timestamp}.jpg"
+        anime_name = f"anime_{run_timestamp}.jpg"
         debug_name = f"debug_{run_timestamp}.json"
+        cropped_path = local_case_dir / cropped_name
+        anime_path = local_case_dir / anime_name
+        _export_jpeg(render_input, cropped_path)
+        anime_source = Path(last_attempt["anime_image_path"]) if last_attempt and last_attempt.get("anime_image_path") else None
+        if anime_source is None or not anime_source.exists():
+            raise FileNotFoundError("anime redraw image missing after successful render")
+        _export_jpeg(anime_source, anime_path)
+        cropped_key = f"{output_prefix.rstrip('/')}/{job_id}/{image_name}/{cropped_name}"
+        anime_key = f"{output_prefix.rstrip('/')}/{job_id}/{image_name}/{anime_name}"
         debug_key = f"{output_prefix.rstrip('/')}/{job_id}/{image_name}/{debug_name}"
         io.write_output(final_mux, final_key)
+        io.write_output(cropped_path, cropped_key)
+        io.write_output(anime_path, anime_key)
         debug["timings"]["upload_video_s"] = 0.0
 
         debug_path = local_case_dir / debug_name
