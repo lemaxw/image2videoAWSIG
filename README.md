@@ -232,7 +232,7 @@ Override at runtime:
 --video-params-json '{"fps":7,"frames":35,"resolution_width":768,"steps":24,"crop_anchor":"center_center"}'
 ```
 
-When `--video-params-json` is provided, only the keys you pass are overridden. It does not merge with the default override block.
+The pipeline always starts from the standard defaults, and `--video-params-json` merges on top of them. If you pass only `preset`, the defaults still apply unless you explicitly override them.
 
 Add extra animation or styling directions at runtime:
 

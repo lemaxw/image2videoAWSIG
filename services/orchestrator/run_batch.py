@@ -593,7 +593,7 @@ def main() -> int:
         parsed = json.loads(args.video_params_json)
         if not isinstance(parsed, dict):
             raise ValueError("--video-params-json must be a JSON object")
-        video_overrides = parsed
+        video_overrides.update(parsed)
     video_overrides = _merge_animation_directions(video_overrides, args.animation_directions)
     _log("info", "video.overrides", job_id=args.job_id, overrides=video_overrides)
 
