@@ -2,10 +2,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl git && rm -rf /var/lib/apt/lists/*
 
 COPY services/audio/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt \
+    && pip install --no-cache-dir --no-deps git+https://github.com/declare-lab/TangoFlux
 
 COPY services/audio/audio_service.py /app/audio_service.py
 

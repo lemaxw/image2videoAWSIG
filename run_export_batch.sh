@@ -5,7 +5,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$REPO_ROOT/.env"
 INPUT_DIR="$REPO_ROOT/video_input"
 OUTPUT_DIR="$REPO_ROOT/video_output"
-SOURCE_DIR="${SOURCE_DIR:-/mnt/c/Documents and Settings/mpshater/Pictures/export/e}"
+SOURCE_DIR="${SOURCE_DIR:-$HOME/images/}"
 JOB_ID="${JOB_ID:-dry-008}"
 OUTPUT_PREFIX="${OUTPUT_PREFIX:-out}"
 
@@ -45,8 +45,26 @@ fi
 
 mkdir -p "$INPUT_DIR" "$OUTPUT_DIR"
 
+expand_env_path() {
+  local path="$1"
+  path="${path%\"}"
+  path="${path#\"}"
+  path="${path%\'}"
+  path="${path#\'}"
+
+  if [[ "$path" == '$HOME'* ]]; then
+    path="${path/#\$HOME/$HOME}"
+  elif [[ "$path" == '~/'* ]]; then
+    path="${path/#\~/$HOME}"
+  fi
+
+  echo "$path"
+}
+
 env_input_dir="$(grep -E '^LOCAL_INPUT_DIR=' "$ENV_FILE" | cut -d= -f2- || true)"
 env_output_dir="$(grep -E '^LOCAL_OUTPUT_DIR=' "$ENV_FILE" | cut -d= -f2- || true)"
+env_input_dir="$(expand_env_path "$env_input_dir")"
+env_output_dir="$(expand_env_path "$env_output_dir")"
 
 if [[ "$env_input_dir" != "$INPUT_DIR" ]]; then
   echo "LOCAL_INPUT_DIR in .env does not match $INPUT_DIR" >&2

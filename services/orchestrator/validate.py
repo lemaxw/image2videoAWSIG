@@ -3,12 +3,12 @@ import random
 from typing import Any, Dict, List
 
 ALLOWED_PRESETS = {
+    "HUNYUAN15_I2V_720P",
+    "HUNYUAN15_I2V_FAST",
     "SVD_SUBTLE",
     "SVD_STRONG",
     "ANIMATEDIFF_GRASS_WIND",
     "ANIMATEDIFF_CITY_PULSE",
-    "ANIMATEDIFF_LOW_MEM",
-    "FAILSAFE_LOW_MEM",
 }
 
 ALLOWED_CROP_ANCHORS = {
@@ -39,67 +39,28 @@ def _scene_tags_text(scene: Dict[str, Any]) -> str:
     return " ".join(str(t).strip().lower().replace("_", " ") for t in (scene.get("tags") or []))
 
 
-def _anime_profile_for_preset(preset: str) -> Dict[str, str]:
+def _audio_profile_for_preset(preset: str) -> Dict[str, str]:
     profiles = {
         "SVD_SUBTLE": {
-            "style": "soft cel shading, clean lineart, gentle anime key visual",
             "audio": "soft, airy, gentle cinematic ambience",
         },
         "SVD_STRONG": {
-            "style": "cinematic cel shading, stronger contrast, polished anime key visual",
             "audio": "atmospheric, warm, cinematic ambience",
         },
         "ANIMATEDIFF_GRASS_WIND": {
-            "style": "soft cel shading, natural outdoor anime illustration, detailed hair movement cues",
             "audio": "airy natural ambience, soft wind texture, cinematic ambience",
         },
         "ANIMATEDIFF_CITY_PULSE": {
-            "style": "urban anime illustration, cinematic cel shading, graphic contrast",
             "audio": "urban ambient texture, soft pulse, cinematic ambience",
         },
-        "ANIMATEDIFF_LOW_MEM": {
-            "style": "simple anime illustration, clean lineart, low-detail stable cel shading",
-            "audio": "soft ambient texture, gentle atmosphere, cinematic ambience",
+        "HUNYUAN15_I2V_720P": {
+            "audio": "cinematic ambient texture, soft atmosphere, natural motion ambience",
         },
-        "FAILSAFE_LOW_MEM": {
-            "style": "simple anime illustration, clean lineart, low-detail stable cel shading",
-            "audio": "soft ambient texture, gentle atmosphere, cinematic ambience",
+        "HUNYUAN15_I2V_FAST": {
+            "audio": "soft cinematic ambience, gentle motion texture",
         },
     }
-    return profiles.get(preset, profiles["FAILSAFE_LOW_MEM"])
-
-
-def _stylization_cues(scene: Dict[str, Any], preset: str, hint: str) -> str:
-    tags = _scene_tags_text(scene)
-    cues: List[str] = []
-    text = f"{tags} {hint.lower()} {preset.lower()}"
-    if any(term in text for term in ["car", "cars", "traffic", "street", "road", "city", "urban"]):
-        cues.append("headlights and taillights become soft streaks of anime light")
-    if any(term in text for term in ["water", "sea", "ocean", "lake", "river"]):
-        cues.append("water becomes luminous with colorful reflections")
-    if any(term in text for term in ["sky", "cloud", "clouds"]):
-        cues.append("sky and clouds become more colorful, layered, and dramatic")
-    if any(term in text for term in ["sunset", "sunrise", "golden hour"]):
-        cues.append("sunlight becomes painterly golden anime glow")
-    if any(term in text for term in ["night", "neon", "lights", "city pulse"]):
-        cues.append("night lighting becomes saturated cinematic anime glow")
-    if any(term in text for term in ["tree", "trees", "grass", "field", "forest", "wind"]):
-        cues.append("foliage simplifies into clean anime shapes with gentle motion-friendly detail")
-    if bool(scene.get("has_people")):
-        cues.append("faces stay readable and expressive")
-    return ", ".join(cues[:4])
-
-
-def _compose_anime_prompt(preset: str, scene: Dict[str, Any], current_prompt: str, hint: str = "") -> str:
-    scene_text = _scene_terms(scene)
-    profile = _anime_profile_for_preset(preset)
-    base = "anime illustration, preserve original composition, preserve camera angle, preserve subject layout"
-    people_guard = ", preserve face placement, preserve body framing" if bool(scene.get("has_people")) else ""
-    detail = current_prompt.strip() if current_prompt and "preserve original composition" not in current_prompt.lower() else profile["style"]
-    hint_text = hint.strip()
-    stylization = _stylization_cues(scene, preset, hint_text)
-    combined = ", ".join(part for part in [base, detail, hint_text, stylization, scene_text] if part)
-    return f"{combined}{people_guard}"[:240]
+    return profiles.get(preset, profiles["SVD_SUBTLE"])
 
 
 def _merge_prompt_hints(*parts: Any) -> str:
@@ -109,6 +70,36 @@ def _merge_prompt_hints(*parts: Any) -> str:
         if text:
             merged.append(text)
     return ", ".join(merged)[:160]
+
+
+def _limit_text(text: str, limit: int) -> str:
+    text = " ".join(str(text or "").split()).strip()
+    if len(text) <= limit:
+        return text
+    clipped = text[:limit].rsplit(" ", 1)[0].rstrip(" ,")
+    return clipped or text[:limit]
+
+
+def _motion_control_params(params: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    if bool(params.get("use_original_input_for_video")):
+        out["use_original_input_for_video"] = True
+    pan_direction = str(params.get("pan_direction", "")).strip().lower()
+    if pan_direction in {"left_to_right", "right_to_left", "top_to_bottom", "bottom_to_top", "auto"}:
+        out["pan_direction"] = pan_direction
+    for key in ("pan_start", "pan_end"):
+        try:
+            out[key] = float(clamp(float(params.get(key)), 0.0, 1.0))
+        except (TypeError, ValueError):
+            pass
+    try:
+        out["pan_max_span"] = float(clamp(float(params.get("pan_max_span")), 0.05, 0.25))
+    except (TypeError, ValueError):
+        pass
+    output_aspect = str(params.get("output_aspect", "")).strip().lower()
+    if output_aspect in {"instagram_reel_9_16", "square_1_1"}:
+        out["output_aspect"] = output_aspect
+    return out
 
 
 def _motion_bucket_for_scene(scene: Dict[str, Any], preset: str, current_value: int) -> int:
@@ -123,13 +114,29 @@ def _motion_bucket_for_scene(scene: Dict[str, Any], preset: str, current_value: 
 
 def _compose_audio_prompt(preset: str, scene: Dict[str, Any], current_prompt: str) -> str:
     scene_text = _scene_terms(scene)
-    profile = _anime_profile_for_preset(preset)
+    tags_text = _scene_tags_text(scene)
+    profile = _audio_profile_for_preset(preset)
     prompt = " ".join(str(current_prompt or "").split()).strip()
     if not prompt:
         prompt = profile["audio"]
+
+    scene_audio = ""
+    if any(term in tags_text for term in ["forest", "tree", "trees", "woods", "meadow", "field", "flower", "grass", "hill", "hills", "countryside", "rural"]):
+        scene_audio = "birds, insects, soft wind through grass"
+    elif any(term in tags_text for term in ["city", "urban", "street", "skyline", "paris", "eiffel", "avenue", "rooftops"]):
+        scene_audio = "distant traffic, occasional train, city ambience"
+    elif any(term in tags_text for term in ["ocean", "sea", "shore", "waves", "beach"]):
+        scene_audio = "small waves, sea breeze, distant gulls"
+    elif any(term in tags_text for term in ["lake", "river", "water", "reflection"]):
+        scene_audio = "gentle water ripples, birds, light wind"
+    elif any(term in tags_text for term in ["orchestra", "concert", "stage", "musicians", "trombone"]):
+        scene_audio = "soft room tone, quiet audience, warm brass resonance"
+
+    if scene_audio and scene_audio not in prompt.lower():
+        prompt = f"{scene_audio}, {prompt}"
     if scene_text != "original scene" and scene_text not in prompt.lower():
         prompt = f"{scene_text}, {prompt}"
-    return prompt[:96]
+    return _limit_text(prompt, 96)
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -144,10 +151,10 @@ def clamp_int(value: Any, low: int, high: int) -> int:
     return int(clamp(ivalue, low, high))
 
 
-def _nearest_mult_64(width: int) -> int:
+def _nearest_mult_64(width: int, high: int = 768) -> int:
     # Comfy workflows and many diffusion checkpoints are more stable on /64 widths.
     rounded = int(round(width / 64.0) * 64)
-    return clamp_int(rounded, 384, 768)
+    return clamp_int(rounded, 384, high)
 
 
 def _resolve_seed(video: Dict[str, Any], params: Dict[str, Any], default_seed: Any = None) -> int:
@@ -163,110 +170,94 @@ def _resolve_seed(video: Dict[str, Any], params: Dict[str, Any], default_seed: A
 
 def default_video_for_preset(preset: str) -> Dict[str, Any]:
     profiles: Dict[str, Dict[str, Any]] = {
-        "SVD_SUBTLE": {
-            "fps": 5,
-            "frames": 16,
-            "resolution_width": 576,
+        "HUNYUAN15_I2V_720P": {
+            "fps": 6,
+            "frames": 30,
+            "resolution_width": 704,
             "params": {
-                "motion_bucket_id": 18,
-                "steps": 18,
-                "anime_ckpt_name": "meinamix_v11.safetensors",
-                "anime_steps": 20,
-                "anime_cfg": 5.0,
-                "anime_denoise": 0.30,
-                "anime_sampler_name": "dpmpp_2m",
-                "anime_scheduler": "karras",
-                "anime_prompt": "anime illustration, clean lineart, soft cel shading, preserve original composition, preserve subject layout, low-motion anime still",
-                "anime_negative_prompt": "photorealistic, realistic skin, 3d, blurry, lowres, deformed hands, bad anatomy, text, watermark, noisy background",
+                "steps": 14,
+                "cfg": 5.8,
+                "shift": 7.0,
+                "weight_dtype": "fp8_e4m3fn",
+                "diffusion_model": "hunyuanvideo1.5_720p_i2v_fp16.safetensors",
+                "text_encoder_1": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+                "text_encoder_2": "byt5_small_glyphxl_fp16.safetensors",
+                "clip_vision_name": "sigclip_vision_patch14_384.safetensors",
+                "vae_name": "hunyuanvideo15_vae_fp16.safetensors",
+                "negative_prompt": "low quality, blurry, distorted, deformed, text, watermark, flicker, jitter",
+            },
+        },
+        "HUNYUAN15_I2V_FAST": {
+            "fps": 6,
+            "frames": 30,
+            "resolution_width": 704,
+            "params": {
+                "steps": 12,
+                "cfg": 5.5,
+                "shift": 7.0,
+                "weight_dtype": "fp8_e4m3fn",
+                "diffusion_model": "hunyuanvideo1.5_720p_i2v_fp16.safetensors",
+                "text_encoder_1": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+                "text_encoder_2": "byt5_small_glyphxl_fp16.safetensors",
+                "clip_vision_name": "sigclip_vision_patch14_384.safetensors",
+                "vae_name": "hunyuanvideo15_vae_fp16.safetensors",
+                "negative_prompt": "low quality, blurry, distorted, deformed, text, watermark, flicker, jitter",
             },
         },
         "SVD_STRONG": {
-            "fps": 5,
-            "frames": 16,
-            "resolution_width": 576,
+            "fps": 8,
+            "frames": 35,
+            "resolution_width": 832,
             "params": {
-                "motion_bucket_id": 24,
-                "steps": 20,
-                "anime_ckpt_name": "counterfeit_v30.safetensors",
-                "anime_steps": 20,
-                "anime_cfg": 5.3,
-                "anime_denoise": 0.32,
-                "anime_sampler_name": "dpmpp_2m",
-                "anime_scheduler": "karras",
-                "anime_prompt": "anime illustration, clean lineart, cinematic cel shading, preserve original composition, preserve pose, preserve camera angle",
-                "anime_negative_prompt": "photorealistic, realistic skin, 3d, blurry, lowres, deformed hands, bad anatomy, text, watermark, oversaturated",
+                "motion_bucket_id": 26,
+                "steps": 25,
+                "augmentation_level": 0.02,
+            },
+        },
+        "SVD_SUBTLE": {
+            "fps": 8,
+            "frames": 35,
+            "resolution_width": 768,
+            "params": {
+                "motion_bucket_id": 18,
+                "steps": 25,
+                "augmentation_level": 0.0,
             },
         },
         "ANIMATEDIFF_GRASS_WIND": {
-            "fps": 5,
-            "frames": 16,
-            "resolution_width": 576,
+            "fps": 8,
+            "frames": 32,
+            "resolution_width": 768,
             "params": {
-                "anime_ckpt_name": "meinamix_v11.safetensors",
-                "anime_steps": 20,
-                "anime_cfg": 5.0,
-                "anime_denoise": 0.32,
-                "anime_sampler_name": "dpmpp_2m",
-                "anime_scheduler": "karras",
-                "anime_prompt": "anime illustration, clean lineart, soft cel shading, detailed hair, preserve original composition, preserve subject layout, subtle natural wind mood",
-                "anime_negative_prompt": "photorealistic, realistic skin, 3d, blurry, lowres, deformed hands, bad anatomy, text, watermark, noisy background",
-                "steps": 18,
-                "motion_bucket_id": 18,
+                "ckpt_name": "meinamix_v11.safetensors",
+                "motion_module": "mm_sd_v15_v2.ckpt",
+                "prompt": "anime landscape, gentle wind, grass and foliage moving softly, cinematic ambient motion, preserve original composition",
+                "negative_prompt": "low quality, blurry, distorted, deformed, bad anatomy, text, watermark, flicker",
+                "steps": 20,
+                "cfg": 4.0,
+                "motion_strength": 42,
+                "context_length": 16,
+                "context_overlap": 4,
             },
         },
         "ANIMATEDIFF_CITY_PULSE": {
-            "fps": 5,
-            "frames": 16,
-            "resolution_width": 576,
+            "fps": 8,
+            "frames": 32,
+            "resolution_width": 768,
             "params": {
-                "anime_ckpt_name": "counterfeit_v30.safetensors",
-                "anime_steps": 20,
-                "anime_cfg": 5.4,
-                "anime_denoise": 0.30,
-                "anime_sampler_name": "dpmpp_2m",
-                "anime_scheduler": "karras",
-                "anime_prompt": "anime illustration, clean lineart, cinematic cel shading, urban key visual, preserve original composition, preserve pose, preserve camera angle",
-                "anime_negative_prompt": "photorealistic, realistic skin, 3d, blurry, lowres, deformed hands, bad anatomy, text, watermark, oversaturated",
-                "steps": 18,
-                "motion_bucket_id": 22,
-            },
-        },
-        "ANIMATEDIFF_LOW_MEM": {
-            "fps": 4,
-            "frames": 12,
-            "resolution_width": 512,
-            "params": {
-                "anime_ckpt_name": "anything-v5-prt.safetensors",
-                "anime_steps": 18,
-                "anime_cfg": 4.8,
-                "anime_denoise": 0.28,
-                "anime_sampler_name": "dpmpp_2m",
-                "anime_scheduler": "karras",
-                "anime_prompt": "anime illustration, clean lineart, soft cel shading, preserve original composition, preserve subject placement, low motion-friendly anime still",
-                "anime_negative_prompt": "photorealistic, realistic skin, 3d, blurry, lowres, deformed hands, bad anatomy, text, watermark, messy lineart",
-                "steps": 16,
-                "motion_bucket_id": 16,
-            },
-        },
-        "FAILSAFE_LOW_MEM": {
-            "fps": 4,
-            "frames": 12,
-            "resolution_width": 512,
-            "params": {
-                "motion_bucket_id": 14,
-                "steps": 14,
-                "anime_ckpt_name": "anything-v5-prt.safetensors",
-                "anime_steps": 16,
-                "anime_cfg": 4.6,
-                "anime_denoise": 0.26,
-                "anime_sampler_name": "dpmpp_2m",
-                "anime_scheduler": "karras",
-                "anime_prompt": "anime illustration, clean lineart, soft cel shading, preserve original composition, preserve subject placement, simple anime still",
-                "anime_negative_prompt": "photorealistic, realistic skin, 3d, blurry, lowres, deformed hands, bad anatomy, text, watermark, messy lineart",
+                "ckpt_name": "counterfeit_v30.safetensors",
+                "motion_module": "mm_sd_v15_v2.ckpt",
+                "prompt": "cinematic anime city scene, subtle camera drift, reflections and lights pulsing softly, preserve original composition",
+                "negative_prompt": "low quality, blurry, distorted, deformed, bad anatomy, text, watermark, flicker",
+                "steps": 20,
+                "cfg": 4.2,
+                "motion_strength": 40,
+                "context_length": 16,
+                "context_overlap": 4,
             },
         },
     }
-    profile = profiles.get(preset, profiles["FAILSAFE_LOW_MEM"])
+    profile = profiles.get(preset, profiles["SVD_SUBTLE"])
     return {
         "preset": preset,
         "duration_s": 5,
@@ -281,90 +272,99 @@ def default_video_for_preset(preset: str) -> Dict[str, Any]:
 def _validate_video(video: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(video, dict):
         video = {}
-    requested_preset = str(video.get("preset", "FAILSAFE_LOW_MEM"))
+    requested_preset = str(video.get("preset", "SVD_SUBTLE"))
     preset = requested_preset
     if preset not in ALLOWED_PRESETS:
-        preset = "FAILSAFE_LOW_MEM"
+        preset = "SVD_SUBTLE"
 
     # Start from preset defaults, then overlay model output.
-    v = copy.deepcopy(default_video_for_preset(preset))
-    v.update({k: video.get(k, v[k]) for k in ["duration_s", "fps", "frames", "resolution_width", "seed", "params"]})
+    preset_defaults = default_video_for_preset(preset)
+    v = copy.deepcopy(preset_defaults)
+    default_params = v.get("params") if isinstance(v.get("params"), dict) else {}
+    incoming_params = video.get("params") if isinstance(video.get("params"), dict) else {}
+    v.update({k: video.get(k, v[k]) for k in ["duration_s", "fps", "frames", "resolution_width", "seed"]})
+    v["params"] = {**default_params, **incoming_params}
     v["preset"] = preset
 
     params = v.get("params") or {}
     v["duration_s"] = 3 if int(video.get("duration_s", params.get("duration_s", v.get("duration_s", 5)))) == 3 else 5
-    v["fps"] = clamp_int(video.get("fps", params.get("fps", v.get("fps", 6))), 3, 10)
+    is_hunyuan = preset.startswith("HUNYUAN15_")
+    fps_max = int(preset_defaults["fps"]) if is_hunyuan else 10
+    frame_max = int(preset_defaults["frames"]) if is_hunyuan else 35
+    resolution_max = int(preset_defaults["resolution_width"]) if is_hunyuan else 832
+    v["fps"] = clamp_int(video.get("fps", params.get("fps", v.get("fps", 6))), 3, fps_max)
     requested_frames = video.get("frames", params.get("frames", v.get("frames", 20)))
     min_frames_for_duration = v["duration_s"] * v["fps"]
-    v["frames"] = clamp_int(max(int(requested_frames), min_frames_for_duration), 10, 35)
+    v["frames"] = clamp_int(max(int(requested_frames), min_frames_for_duration), 10, frame_max)
     v["resolution_width"] = _nearest_mult_64(
-        clamp_int(video.get("resolution_width", params.get("resolution_width", v.get("resolution_width", 576))), 384, 768)
+        clamp_int(video.get("resolution_width", params.get("resolution_width", v.get("resolution_width", 576))), 384, resolution_max),
+        high=resolution_max,
     )
     v["seed"] = _resolve_seed(video, params, v.get("seed"))
 
     # Clamp preset-specific parameters to safe execution ranges.
-    if preset.startswith("SVD") or preset == "FAILSAFE_LOW_MEM":
-        prompt_hint = _merge_prompt_hints(params.get("anime_prompt_hint", ""), params.get("animation_directions", ""))
-        motion_strength = clamp_int(params.get("motion_strength", 35), 10, 80)
-        mapped_motion = clamp_int(int(round(motion_strength * 0.75)), 10, 80)
+    if preset.startswith("HUNYUAN15_"):
+        prompt_hint = _merge_prompt_hints(params.get("prompt", ""), params.get("video_prompt", ""), params.get("animation_directions", ""))
         v["params"] = {
-            "motion_bucket_id": clamp_int(params.get("motion_bucket_id", mapped_motion), 10, 80),
-            "steps": clamp_int(params.get("steps", 16), 12, 25),
-            "anime_ckpt_name": str(params.get("anime_ckpt_name", "meinamix_v11.safetensors"))[:160],
-            "anime_steps": clamp_int(params.get("anime_steps", 20), 12, 28),
-            "anime_cfg": float(clamp(float(params.get("anime_cfg", 5.0)), 2.0, 7.0)),
-            "anime_denoise": float(clamp(float(params.get("anime_denoise", 0.30)), 0.15, 0.45)),
-            "anime_sampler_name": str(params.get("anime_sampler_name", "dpmpp_2m"))[:40],
-            "anime_scheduler": str(params.get("anime_scheduler", "karras"))[:40],
-            "anime_prompt": str(
+            "prompt": prompt_hint
+            or "cinematic image-to-video motion, preserve original subject identity and composition, natural camera movement",
+            "negative_prompt": str(
                 params.get(
-                    "anime_prompt",
-                    "anime illustration, clean lineart, soft cel shading, preserve original composition",
+                    "negative_prompt",
+                    "low quality, blurry, distorted, deformed, text, watermark, flicker, jitter",
                 )
             )[:240],
-            "anime_prompt_hint": prompt_hint,
-            "anime_negative_prompt": str(
-                params.get(
-                    "anime_negative_prompt",
-                    "photorealistic, realistic skin, 3d, blurry, lowres, deformed hands, bad anatomy, text, watermark",
-                )
-            )[:240],
+            "steps": clamp_int(params.get("steps", default_params.get("steps", 12)), 8, int(default_params.get("steps", 12))),
+            "cfg": float(clamp(float(params.get("cfg", default_params.get("cfg", 5.5))), 1.0, float(default_params.get("cfg", 5.5)))),
+            "shift": float(clamp(float(params.get("shift", 7.0)), 1.0, 12.0)),
+            "weight_dtype": str(params.get("weight_dtype", "default"))[:40],
+            "diffusion_model": str(params.get("diffusion_model", "hunyuanvideo1.5_720p_i2v_fp16.safetensors"))[:160],
+            "text_encoder_1": str(params.get("text_encoder_1", "qwen_2.5_vl_7b_fp8_scaled.safetensors"))[:160],
+            "text_encoder_2": str(params.get("text_encoder_2", "byt5_small_glyphxl_fp16.safetensors"))[:160],
+            "clip_vision_name": str(params.get("clip_vision_name", "sigclip_vision_patch14_384.safetensors"))[:160],
+            "vae_name": str(params.get("vae_name", "hunyuanvideo15_vae_fp16.safetensors"))[:160],
             "duration_s": v["duration_s"],
             "fps": v["fps"],
             "frames": v["frames"],
             "resolution_width": v["resolution_width"],
             "seed": v["seed"],
             "requested_preset": requested_preset,
+            **_motion_control_params(params),
         }
-    else:
-        prompt_hint = _merge_prompt_hints(params.get("anime_prompt_hint", ""), params.get("animation_directions", ""))
+    elif preset.startswith("SVD"):
+        motion_strength = clamp_int(params.get("motion_strength", 35), 10, 80)
+        mapped_motion = clamp_int(int(round(motion_strength * 0.75)), 10, 80)
         v["params"] = {
-            "steps": clamp_int(params.get("steps", 18), 12, 24),
-            "motion_bucket_id": clamp_int(params.get("motion_bucket_id", 18), 10, 32),
-            "anime_ckpt_name": str(params.get("anime_ckpt_name", "meinamix_v11.safetensors"))[:160],
-            "anime_steps": clamp_int(params.get("anime_steps", 20), 12, 28),
-            "anime_cfg": float(clamp(float(params.get("anime_cfg", 5.2)), 2.0, 7.0)),
-            "anime_denoise": float(clamp(float(params.get("anime_denoise", 0.32)), 0.15, 0.45)),
-            "anime_sampler_name": str(params.get("anime_sampler_name", "dpmpp_2m"))[:40],
-            "anime_scheduler": str(params.get("anime_scheduler", "karras"))[:40],
-            "anime_prompt": str(
-                params.get(
-                    "anime_prompt",
-                    "anime illustration, clean lineart, soft cel shading, preserve original composition",
-                )
-            )[:240],
-            "anime_prompt_hint": prompt_hint,
-            "anime_negative_prompt": str(
-                params.get(
-                    "anime_negative_prompt",
-                    "photorealistic, realistic skin, 3d, blurry, lowres, deformed hands, bad anatomy, text, watermark",
-                )
-            )[:240],
+            "motion_bucket_id": clamp_int(params.get("motion_bucket_id", mapped_motion), 10, 80),
+            "steps": clamp_int(params.get("steps", 16), 12, 25),
+            "augmentation_level": float(clamp(float(params.get("augmentation_level", 0.0)), 0.0, 0.08)),
             "duration_s": v["duration_s"],
             "fps": v["fps"],
             "frames": v["frames"],
             "resolution_width": v["resolution_width"],
             "seed": v["seed"],
+            "requested_preset": requested_preset,
+            **_motion_control_params(params),
+        }
+    else:
+        prompt_hint = _merge_prompt_hints(params.get("prompt", ""), params.get("animation_directions", ""))
+        v["params"] = {
+            "steps": clamp_int(params.get("steps", 18), 12, 24),
+            "ckpt_name": str(params.get("ckpt_name", params.get("anime_ckpt_name", "meinamix_v11.safetensors")))[:160],
+            "motion_module": str(params.get("motion_module", params.get("motion_model_name", "mm_sd_v15_v2.ckpt")))[:160],
+            "prompt": prompt_hint or str(params.get("prompt", "cinematic anime scene with subtle motion, preserve original composition"))[:300],
+            "negative_prompt": str(params.get("negative_prompt", "low quality, blurry, distorted, deformed, bad anatomy, text, watermark, flicker"))[:240],
+            "cfg": float(clamp(float(params.get("cfg", 4.0)), 1.0, 7.0)),
+            "motion_strength": clamp_int(params.get("motion_strength", 40), 20, 70),
+            "context_length": clamp_int(params.get("context_length", 16), 8, 24),
+            "context_overlap": clamp_int(params.get("context_overlap", 4), 0, 8),
+            "duration_s": v["duration_s"],
+            "fps": v["fps"],
+            "frames": v["frames"],
+            "resolution_width": v["resolution_width"],
+            "seed": v["seed"],
+            "requested_preset": requested_preset,
+            **_motion_control_params(params),
         }
 
     return v
@@ -395,7 +395,7 @@ def validate_and_clamp_decision(raw: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(audio, dict):
         audio = {}
     audio_out = {
-        "prompt": " ".join(str(audio.get("prompt", "soft ambience")).split())[:96],
+        "prompt": " ".join(str(audio.get("prompt", "soft ambience")).split())[:220],
         "duration_s": 3 if int(audio.get("duration_s", video["duration_s"])) == 3 else 5,
         # Keep audio clearly audible in final mux by default.
         "mix_db": float(clamp(float(audio.get("mix_db", -2.0)), -3.0, 6.0)),
@@ -414,19 +414,23 @@ def validate_and_clamp_decision(raw: Dict[str, Any]) -> Dict[str, Any]:
         if len(fallbacks) == 0:
             fallbacks.append(default_video_for_preset("SVD_SUBTLE"))
         else:
-            fallbacks.append(default_video_for_preset("FAILSAFE_LOW_MEM"))
+            fallbacks.append(default_video_for_preset("ANIMATEDIFF_GRASS_WIND"))
 
     scene_out = {
         "tags": [str(t)[:50] for t in (scene.get("tags") or [])[:8]],
         "has_people": bool(scene.get("has_people", False)),
         "confidence": float(clamp(float(scene.get("confidence", 0.5)), 0.0, 1.0)),
     }
-    video["params"]["anime_prompt"] = _compose_anime_prompt(
-        video["preset"],
-        scene_out,
-        str(video["params"].get("anime_prompt", "")),
-        str(video["params"].get("anime_prompt_hint", "")),
-    )
+    if str(video["preset"]).startswith("HUNYUAN15_"):
+        scene_text = _scene_terms(scene_out)
+        current_prompt = str(video["params"].get("prompt", "")).strip()
+        if scene_text != "original scene" and scene_text not in current_prompt.lower():
+            video["params"]["prompt"] = f"{scene_text}, {current_prompt}"[:300]
+    elif str(video["preset"]).startswith("ANIMATEDIFF_"):
+        scene_text = _scene_terms(scene_out)
+        current_prompt = str(video["params"].get("prompt", "")).strip()
+        if scene_text != "original scene" and scene_text not in current_prompt.lower():
+            video["params"]["prompt"] = f"{scene_text}, {current_prompt}"[:300]
     if "motion_bucket_id" in video["params"]:
         video["params"]["motion_bucket_id"] = _motion_bucket_for_scene(
             scene_out,
@@ -435,12 +439,16 @@ def validate_and_clamp_decision(raw: Dict[str, Any]) -> Dict[str, Any]:
         )
     audio_out["prompt"] = _compose_audio_prompt(video["preset"], scene_out, audio_out["prompt"])
     for fb in fallbacks:
-        fb["params"]["anime_prompt"] = _compose_anime_prompt(
-            fb["preset"],
-            scene_out,
-            str(fb["params"].get("anime_prompt", "")),
-            str(fb["params"].get("anime_prompt_hint", "")),
-        )
+        if str(fb["preset"]).startswith("HUNYUAN15_"):
+            scene_text = _scene_terms(scene_out)
+            current_prompt = str(fb["params"].get("prompt", "")).strip()
+            if scene_text != "original scene" and scene_text not in current_prompt.lower():
+                fb["params"]["prompt"] = f"{scene_text}, {current_prompt}"[:300]
+        elif str(fb["preset"]).startswith("ANIMATEDIFF_"):
+            scene_text = _scene_terms(scene_out)
+            current_prompt = str(fb["params"].get("prompt", "")).strip()
+            if scene_text != "original scene" and scene_text not in current_prompt.lower():
+                fb["params"]["prompt"] = f"{scene_text}, {current_prompt}"[:300]
         if "motion_bucket_id" in fb["params"]:
             fb["params"]["motion_bucket_id"] = _motion_bucket_for_scene(
                 scene_out,

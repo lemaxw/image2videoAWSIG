@@ -19,7 +19,7 @@
       "video_frames": __FRAMES__,
       "motion_bucket_id": __MOTION_BUCKET_ID__,
       "fps": __FPS__,
-      "augmentation_level": 0.0,
+      "augmentation_level": __AUGMENTATION_LEVEL__,
       "clip_vision": ["5", 1],
       "init_image": ["3", 0],
       "vae": ["5", 2]
@@ -30,7 +30,7 @@
     "inputs": {
       "seed": __SEED__,
       "steps": __STEPS__,
-      "cfg": 2.5,
+      "cfg": 2.8,
       "sampler_name": "euler",
       "scheduler": "normal",
       "denoise": 1,
@@ -55,7 +55,7 @@
       "filename_prefix": "__OUTPUT_PREFIX__",
       "format": "video/h264-mp4",
       "pix_fmt": "yuv420p",
-      "crf": 20,
+      "crf": 18,
       "pingpong": false,
       "save_output": true,
       "images": ["12", 0]

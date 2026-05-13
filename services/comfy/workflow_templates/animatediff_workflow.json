@@ -26,48 +26,58 @@
     }
   },
   "5": {
-    "class_type": "VAEEncode",
+    "class_type": "ImageScale",
     "inputs": {
-      "pixels": ["2", 0],
-      "vae": ["1", 2]
+      "image": ["2", 0],
+      "width": __WIDTH__,
+      "height": __HEIGHT__,
+      "upscale_method": "lanczos",
+      "crop": "disabled"
     }
   },
   "6": {
-    "class_type": "RepeatLatentBatch",
+    "class_type": "VAEEncode",
     "inputs": {
-      "samples": ["5", 0],
-      "amount": __FRAMES__
+      "pixels": ["5", 0],
+      "vae": ["1", 2]
     }
   },
   "7": {
+    "class_type": "RepeatLatentBatch",
+    "inputs": {
+      "samples": ["6", 0],
+      "amount": __FRAMES__
+    }
+  },
+  "8": {
     "class_type": "ADE_LoadAnimateDiffModel",
     "inputs": {
       "model_name": "__MOTION_MODULE__"
     }
   },
-  "8": {
+  "9": {
     "class_type": "ADE_ApplyAnimateDiffModelSimple",
     "inputs": {
-      "motion_model": ["7", 0]
+      "motion_model": ["8", 0]
     }
   },
-  "9": {
+  "10": {
     "class_type": "ADE_StandardStaticContextOptions",
     "inputs": {
       "context_length": __CONTEXT_LENGTH__,
       "context_overlap": __CONTEXT_OVERLAP__
     }
   },
-  "10": {
+  "11": {
     "class_type": "ADE_UseEvolvedSampling",
     "inputs": {
       "model": ["1", 0],
       "beta_schedule": "sqrt_linear (AnimateDiff)",
-      "m_models": ["8", 0],
-      "context_options": ["9", 0]
+      "m_models": ["9", 0],
+      "context_options": ["10", 0]
     }
   },
-  "11": {
+  "12": {
     "class_type": "KSampler",
     "inputs": {
       "seed": __SEED__,
@@ -76,20 +86,20 @@
       "sampler_name": "euler",
       "scheduler": "normal",
       "denoise": __DENOISE__,
-      "model": ["10", 0],
+      "model": ["11", 0],
       "positive": ["3", 0],
       "negative": ["4", 0],
-      "latent_image": ["6", 0]
-    }
-  },
-  "12": {
-    "class_type": "VAEDecode",
-    "inputs": {
-      "samples": ["11", 0],
-      "vae": ["1", 2]
+      "latent_image": ["7", 0]
     }
   },
   "13": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["12", 0],
+      "vae": ["1", 2]
+    }
+  },
+  "14": {
     "class_type": "VHS_VideoCombine",
     "inputs": {
       "frame_rate": __FPS__,
@@ -97,10 +107,10 @@
       "filename_prefix": "__OUTPUT_PREFIX__",
       "format": "video/h264-mp4",
       "pix_fmt": "yuv420p",
-      "crf": 20,
+      "crf": 18,
       "pingpong": false,
       "save_output": true,
-      "images": ["12", 0]
+      "images": ["13", 0]
     }
   }
 }

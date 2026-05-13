@@ -1,6 +1,6 @@
 # Agent Notes
 
-Read [README.md](/home/mpshater/hobby/image2videoAWSIG/README.md) first.
+Read [README.md]($HOME/hobby/image2videoAWSIG/README.md) first.
 
 `README.md` is the source of truth for:
 - service explanations
@@ -16,7 +16,9 @@ Read [README.md](/home/mpshater/hobby/image2videoAWSIG/README.md) first.
   - `--local-input-dir`
   - `--local-output-dir`
 - Default video params are applied automatically:
-  - `fps=7, frames=35, resolution_width=768, steps=24`
+  - OpenAI decision selects `preset`; local defaults do not force it.
+  - Preset defaults supply `fps`, `frames`, and `resolution_width`.
+  - `steps=25, anime_steps=28, anime_cfg=5.4, anime_denoise=0.32`
   - `seed` is auto-generated unless explicitly provided.
 - `debug.json` is always saved.
 - Intermediate artifacts are only preserved with `--debug`.

@@ -77,12 +77,12 @@ DECISION_SCHEMA: Dict[str, Any] = {
                 "preset": {
                     "type": "string",
                     "enum": [
+                        "HUNYUAN15_I2V_720P",
+                        "HUNYUAN15_I2V_FAST",
                         "SVD_SUBTLE",
                         "SVD_STRONG",
                         "ANIMATEDIFF_GRASS_WIND",
-                        "ANIMATEDIFF_CITY_PULSE",
-                        "ANIMATEDIFF_LOW_MEM",
-                        "FAILSAFE_LOW_MEM"
+                        "ANIMATEDIFF_CITY_PULSE"
                     ]
                 },
                 "duration_s": {"type": "integer", "enum": [3, 5]},
@@ -96,70 +96,146 @@ DECISION_SCHEMA: Dict[str, Any] = {
     }
 }
 
-SYSTEM_PROMPT = """You are a decision engine for an image -> anime -> video pipeline.
+SYSTEM_PROMPT = """You are selecting the best image-to-video treatment for one image.
 
-The pipeline always works in two stages:
-1) the input image is first redrawn into anime style while preserving composition
-2) the anime image is then animated into a short cinematic clip
+Goal:
+choose the preset and motion style that will create the most visually appealing final video.
 
-Your task is to choose the safest and most appropriate animation preset and provide minimal scene guidance.
+Two backend families exist:
 
-Output JSON only and follow the schema exactly.
+1. Hunyuan presets:
+direct cinematic image-to-video realism
+
+2. SVD / AnimateDiff presets:
+anime-style redraw first, then animation
 
 ------------------------------------------------
-PRESET GUIDE
+PRESETS
 ------------------------------------------------
 
-Choose ONE primary preset and EXACTLY TWO fallbacks.
+HUNYUAN15_I2V_720P
+- premium cinematic realism
+- best quality and temporal consistency
+- ideal for people, travel, landscapes, architecture, products, cinematic shots
 
-SVD_SUBTLE
-- default choice
-- conservative anime redraw
-- minimal motion
-- best identity/composition preservation
-- safest for 8GB GPUs
-
-SVD_STRONG
-- cinematic anime interpretation
-- stronger motion
-- more dynamic sky, water, foliage
-- higher risk of artifacts
+HUNYUAN15_I2V_FAST
+- faster/lighter Hunyuan fallback
+- use for complex, crowded, detailed, or expensive scenes
 
 ANIMATEDIFF_GRASS_WIND
-- outdoor anime scenes
-- nature environments
-- gentle wind movement
-- foliage, grass, clouds drifting
+- anime outdoor atmosphere
+- foliage, grass, forests, clouds, dreamy scenery, gentle wind
 
 ANIMATEDIFF_CITY_PULSE
-- urban anime scenes
-- neon lights, streets, reflections
-- stronger graphic contrast and motion
+- anime urban atmosphere
+- neon, rain, nightlife, reflections, city energy
 
-ANIMATEDIFF_LOW_MEM
-- simplified anime motion
-- lower complexity scenes
-- safer for limited VRAM
+SVD_STRONG
+- dramatic cinematic reinterpretation
+- stronger atmospheric motion and visual exaggeration
+- ideal for sunsets, oceans, fog, glowing reflections, dramatic skies, haze, particles, fantasy mood, and emotionally cinematic environmental motion
 
-FAILSAFE_LOW_MEM
-- simplest possible animation
-- minimal motion
-- last fallback for stability
-
-If uncertain prefer:
-SVD_SUBTLE -> FAILSAFE_LOW_MEM
+SVD_SUBTLE
+- emergency stability fallback
+- use only when stronger cinematic motion is likely to create artifacts or unstable geometry
+- primarily for fragile close-up portraits, logos, text-heavy images, dense architecture, low-detail noisy scenes, or highly detail-sensitive compositions
 
 ------------------------------------------------
-FRAMING GUIDE
+SELECTION ORDER
+------------------------------------------------
+
+Prefer presets in this order when appropriate:
+
+1. HUNYUAN15_I2V_720P
+2. HUNYUAN15_I2V_FAST
+3. ANIMATEDIFF_GRASS_WIND
+4. ANIMATEDIFF_CITY_PULSE
+5. SVD_STRONG
+6. SVD_SUBTLE
+
+------------------------------------------------
+SELECTION RULES
+------------------------------------------------
+
+- prefer Hunyuan for realistic cinematic motion
+- use AnimateDiff presets when anime reinterpretation improves the final video aesthetically
+- use SVD_STRONG for atmospheric cinematic reinterpretation
+- use SVD_STRONG mainly when the scene benefits from dramatic atmospheric exaggeration, not merely because the scene is cinematic
+- use SVD_SUBTLE only when stronger cinematic motion is likely to fail or create visible artifacts
+- preserve faces and composition unless stylization clearly improves the final result
+- avoid chaotic or aggressive motion
+
+Special rules:
+- night city scenes can use atmospheric cinematic motion, but avoid aggressive zoom-in or push-in camera movement
+- for night cities prefer stable framing, slow lateral drift, reflections, neon flicker, rain shimmer, and atmospheric glow
+- do not default night city photography to SVD_SUBTLE
+- for cloud-drift animation prefer HUNYUAN or AnimateDiff presets
+- avoid SVD presets when cloud movement is the primary motion opportunity unless dramatic reinterpretation is desired
+
+------------------------------------------------
+MOTION GUIDANCE
+------------------------------------------------
+
+video.params.prompt or video.params.video_prompt should describe:
+- motion
+- atmosphere
+- cinematic camera feel
+
+Good motion examples:
+- slow cinematic drift
+- gentle wind through grass
+- drifting clouds
+- soft neon reflections
+- subtle ocean movement
+- atmospheric fog movement
+- gentle rain shimmer
+- stable cinematic hold
+- slow lateral camera drift
+
+Avoid:
+- aggressive zoom-ins
+- fast camera shake
+- chaotic motion
+- rapid scene transformations
+
+anime_prompt_hint:
+short visual enhancement hint for stylized animation
+
+Examples:
+- soft anime neon glow
+- dramatic anime clouds
+- dreamy watercolor foliage
+- warm glowing sand tones
+- atmospheric rain reflections
+
+Do not change the core composition of the image.
+
+Wide composition / pan rule:
+- If important subjects are far apart and a single vertical crop would lose the visual story, set video.params.use_original_input_for_video=true.
+- Use this for wide moon + skyline/building scenes, panoramas, broad landscapes, or subject/context pairs separated across the image.
+- When using the original image, describe a cinematic result with slow lateral camera travel such as left-to-right or right-to-left drift.
+- If a 9:16 pan would be too zoomed or would cut away the story, set video.params.output_aspect="square_1_1".
+- Prefer square_1_1 for wide moon + building/city scenes where square framing preserves both the moon and architecture better than vertical Reel crop.
+- Use video.params.output_aspect="instagram_reel_9_16" only when the vertical crop remains visually strong.
+- For square moon + building/city scenes, keep the moon comfortably inside the frame, not touching the edge; pan_start is usually around 0.54-0.60 for left-to-right motion.
+- You may include video.params.pan_direction as left_to_right, right_to_left, top_to_bottom, bottom_to_top, or auto.
+- You may include video.params.pan_start and video.params.pan_end as floats from 0.0 to 1.0, where 0.0 is the far left/top of the source and 1.0 is the far right/bottom.
+- Choose a partial pan window that fits the duration; do not sweep the entire image unless the full journey is essential.
+- For a 5-second video, keep abs(pan_end - pan_start) <= 0.18. Prefer 0.08-0.16 for slow, smooth motion.
+- If important subjects are farther apart than this limit, choose the best starting composition and drift only slightly toward the secondary subject.
+- You may include video.params.pan_max_span, but it must be between 0.05 and 0.25.
+- Pick the best starting point so the first frame is already visually useful, then drift slowly toward the secondary subject.
+- The pipeline will export a still image from the final cropped video; choose output_aspect and pan window so the video and still both make sense.
+- Prefer this mainly with Hunyuan presets; cropped input is still better for portraits, single subjects, text, logos, symmetry, and detail-sensitive architecture.
+
+------------------------------------------------
+FRAMING
 ------------------------------------------------
 
 target_aspect must always be:
-
 instagram_reel_9_16
 
-crop_anchor indicates where the main subject should remain after cropping.
-
-Allowed values:
+crop_anchor values:
 left_top
 center_top
 right_top
@@ -170,118 +246,86 @@ left_bottom
 center_bottom
 right_bottom
 
-Cropping rules:
-- never cut off heads or bodies
-- if people are present and position uncertain -> use center_center
-- if main subject clearly centered -> center_center
-- if subject is clearly near an edge -> anchor to that edge
+Keep people fully visible after crop.
+
+Rules:
+- keep people fully visible after crop
+- avoid cutting heads or bodies
+- if uncertain, use center_center
 
 ------------------------------------------------
-SCENE GUIDE (MANDATORY)
+SCENE
 ------------------------------------------------
 
 Always return:
-
 scene.tags
 scene.has_people
 scene.confidence
 
-Rules:
-- scene.tags should contain several short keywords, ideally 5-8 items
-- examples: desert, road, sunset, city, night, mountains, ocean
-- do not use long sentences
-- scene.has_people must indicate if one or more people appear
-- scene.confidence must be a float 0-1
-
-------------------------------------------------
-ANIME STYLIZATION GUIDE
-------------------------------------------------
-
-The system first redraws the image as anime.
-
-You may add optional stylization hints in:
-
-video.params.anime_prompt_hint
-
-Purpose:
-guide how the anime redraw should enhance the scene while preserving composition.
-
-Keep it short and visual.
+scene.tags:
+5-8 short keywords only
 
 Examples:
+ocean
+sunset
+city
+night
+mountains
+forest
+fog
+beach
 
-cars -> glowing light streaks
-water -> colorful anime reflections
-sky -> dramatic anime clouds
-city night -> soft neon glow
-foliage -> simplified anime leaves
-desert -> glowing warm sand tones
-
-Do not change the core layout of the scene.
-
-------------------------------------------------
-MOTION DESIGN GUIDE
-------------------------------------------------
-
-Prefer motion that feels natural and cinematic.
-
-Typical motion elements:
-
-clouds drifting
-grass moving in wind
-light rays shifting
-water ripples
-soft atmospheric fog
-neon reflections flicker
-
-Avoid chaotic or aggressive motion.
+scene.confidence:
+float between 0 and 1
 
 ------------------------------------------------
-AUDIO GUIDE
+AUDIO
 ------------------------------------------------
 
-Return ONE compact ambient prompt under 96 characters.
+Return one short ambient audio prompt under 96 characters.
 
-Structure:
-"<environment>, <secondary texture>, cinematic ambience"
+Format:
+"<environment>, <texture>, cinematic ambience"
 
 Examples:
-
-desert wind, airy sand movement, cinematic ambience
 quiet city night, soft neon hum, cinematic ambience
+desert wind, airy sand movement, cinematic ambience
 mountain valley, gentle wind and birds, cinematic ambience
 
-Rules:
-- match the intended anime interpretation
-- avoid aggressive words: loud, chaotic, intense
-- prefer ambient soundscape over melody-heavy music
-- include at least one texture word:
-soft, warm, airy, dreamy, gentle, atmospheric, ambient
+Prefer:
+soft
+warm
+airy
+dreamy
+gentle
+atmospheric
+ambient
+
+Avoid:
+loud
+chaotic
+aggressive
 
 ------------------------------------------------
-KEY NAMING CONTRACT (MANDATORY)
+OUTPUT RULES
 ------------------------------------------------
 
-Use exactly this object shape:
+Return JSON only.
 
-video: { preset, duration_s, fps, frames, resolution_width, seed, params }
-audio: { prompt, duration_s, mix_db }
-framing: { target_aspect, crop_anchor }
-scene: { tags, has_people, confidence }
-fallbacks: array of exactly two video objects
+Top-level keys:
+scene
+framing
+video
+audio
+fallbacks
 
-Do NOT use aliases like:
-preset_primary
-preset_fallbacks
-audio_prompt
-decision
+fallbacks:
+exactly two video objects
 
-------------------------------------------------
-FINAL RULE
-------------------------------------------------
+Use only valid preset enum names.
 
-When uncertain always prioritize stability and composition preservation.
-Prefer SVD_SUBTLE or FAILSAFE_LOW_MEM.
+When uncertain:
+prefer the most visually appealing final video while protecting composition and identity.
 """
 
 
@@ -297,12 +341,12 @@ def _fallback_decision_payload() -> Dict[str, Any]:
             "crop_anchor": "center_center",
         },
         "video": {
-            "preset": "FAILSAFE_LOW_MEM",
+            "preset": "HUNYUAN15_I2V_FAST",
             "duration_s": 5,
             "fps": 6,
-            "frames": 20,
-            "resolution_width": 576,
-            "params": {"motion_bucket_id": 24, "steps": 14},
+            "frames": 30,
+            "resolution_width": 704,
+            "params": {"steps": 12, "prompt": "gentle cinematic motion, preserve original composition"},
         },
         "audio": {
             "prompt": "soft ambient city",
@@ -319,12 +363,12 @@ def _fallback_decision_payload() -> Dict[str, Any]:
                 "params": {"motion_bucket_id": 22, "steps": 14},
             },
             {
-                "preset": "FAILSAFE_LOW_MEM",
-                "duration_s": 3,
-                "fps": 5,
-                "frames": 15,
-                "resolution_width": 512,
-                "params": {"motion_bucket_id": 20, "steps": 12},
+                "preset": "ANIMATEDIFF_GRASS_WIND",
+                "duration_s": 5,
+                "fps": 8,
+                "frames": 32,
+                "resolution_width": 768,
+                "params": {"steps": 20, "prompt": "gentle anime-style motion, preserve original composition"},
             },
         ],
     }
@@ -555,7 +599,8 @@ def decide_for_image_detailed(image_path: Path, metadata: Dict[str, Any] | None 
             "Enforce schema constraints, include exactly two fallbacks, and set framing.target_aspect=instagram_reel_9_16. "
             "Use only preset enum values exactly as provided. "
             "Mandatory: include scene.tags, scene.has_people, scene.confidence. "
-            "Add a short video.params.anime_prompt_hint when useful to make the anime redraw more expressive while preserving composition. "
+            "Add short video.params.prompt or video.params.animation_directions when useful to describe motion while preserving composition. "
+            "For wide scenes where vertical pan/crop would be too zoomed, set video.params.output_aspect=square_1_1. "
             "Choose crop_anchor to keep people uncut in frame. "
             "Top-level keys must be exactly: scene, framing, video, audio, fallbacks (do not nest scene/framing inside video). "
             "Use nested object fields only: video.preset means the `preset` field inside the `video` object, "
@@ -626,7 +671,8 @@ def decide_for_image_detailed(image_path: Path, metadata: Dict[str, Any] | None 
                                         "Return strict JSON only, include exactly two fallbacks, "
                                         "set framing.target_aspect=instagram_reel_9_16, and use only preset enum values. "
                                         "Mandatory: include scene.tags, scene.has_people, scene.confidence. "
-                                        "Add a short video.params.anime_prompt_hint when useful to make the anime redraw more expressive while preserving composition. "
+                                        "Add short video.params.prompt or video.params.animation_directions when useful to describe motion while preserving composition. "
+                                        "For wide scenes where vertical pan/crop would be too zoomed, set video.params.output_aspect=square_1_1. "
                                         "Choose crop_anchor to keep people uncut in frame. "
                                         "Top-level keys must be exactly: scene, framing, video, audio, fallbacks "
                                         "(do not nest scene/framing inside video). "

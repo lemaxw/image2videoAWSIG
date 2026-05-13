@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import List
@@ -20,8 +21,40 @@ logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.INFO)
 
 _PIPE = None
-FORBIDDEN_PROMPT_WORDS = {"loud", "chaotic", "intense", "fast"}
+FORBIDDEN_PROMPT_WORDS = {"loud", "chaotic", "intense", "fast", "music", "song", "melody"}
 TEXTURE_HINTS = ("soft", "warm", "airy", "dreamy", "gentle", "cinematic", "atmospheric", "ambient")
+SOUND_WORDS = (
+    "bird",
+    "birds",
+    "insect",
+    "insects",
+    "bug",
+    "bugs",
+    "wind",
+    "traffic",
+    "train",
+    "trains",
+    "cars",
+    "car",
+    "waves",
+    "water",
+    "ripples",
+    "hum",
+    "tone",
+    "audience",
+    "brass",
+    "gulls",
+    "breeze",
+)
+
+SCENE_SOUND_HINTS = (
+    (("forest", "trees", "woods", "meadow", "field", "flower", "grass", "hills", "countryside"), "birds, insects, soft wind through grass"),
+    (("city", "urban", "street", "skyline", "paris", "eiffel", "avenue", "rooftops"), "distant traffic, occasional train, city ambience"),
+    (("night", "neon", "bridge", "lights"), "soft city hum, distant traffic, gentle air"),
+    (("ocean", "sea", "shore", "waves", "beach"), "small waves, sea breeze, distant gulls"),
+    (("lake", "river", "water", "reflection"), "gentle water ripples, birds, light wind"),
+    (("orchestra", "concert", "stage", "musicians", "trombone"), "soft room tone, quiet audience, warm brass resonance"),
+)
 
 
 class GenerateRequest(BaseModel):
@@ -38,23 +71,34 @@ class GenerateResponse(BaseModel):
 def _load_backend():
     global _PIPE
     backend = os.environ.get("AUDIO_MODEL_BACKEND", "mock").lower()
-    if backend != "audioldm":
+    if backend not in {"audioldm", "tangoflux"}:
         return None
     if _PIPE is not None:
         return _PIPE
 
-    from diffusers import AudioLDMPipeline
-
     device_name = os.environ.get("AUDIO_DEVICE", "cpu")
     dtype = torch.float16 if device_name == "cuda" else torch.float32
     cache_dir = os.environ.get("AUDIO_CACHE_DIR", "/cache")
-    logger.info("audio.backend.init backend=audioldm device=%s dtype=%s cache_dir=%s", device_name, str(dtype), cache_dir)
-    _PIPE = AudioLDMPipeline.from_pretrained(
-        "cvssp/audioldm-s-full-v2",
-        torch_dtype=dtype,
-        cache_dir=cache_dir,
-    )
-    _PIPE = _PIPE.to(device_name)
+    logger.info("audio.backend.init backend=%s device=%s dtype=%s cache_dir=%s", backend, device_name, str(dtype), cache_dir)
+    if backend == "tangoflux":
+        os.environ.setdefault("HF_HOME", cache_dir)
+        os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+        from tangoflux import TangoFluxInference
+
+        started = time.time()
+        _PIPE = TangoFluxInference(name=os.environ.get("TANGOFLUX_MODEL", "declare-lab/TangoFlux"), device=device_name)
+        logger.info("audio.backend.ready backend=tangoflux duration_s=%.3f", time.time() - started)
+    else:
+        from diffusers import AudioLDMPipeline
+
+        started = time.time()
+        _PIPE = AudioLDMPipeline.from_pretrained(
+            "cvssp/audioldm-s-full-v2",
+            torch_dtype=dtype,
+            cache_dir=cache_dir,
+        )
+        _PIPE = _PIPE.to(device_name)
+        logger.info("audio.backend.ready backend=audioldm duration_s=%.3f", time.time() - started)
     return _PIPE
 
 
@@ -90,27 +134,36 @@ def _normalize_prompt(raw_prompt: str) -> str:
     lowered = text.lower()
     parts = [p.strip() for p in text.split(",") if p.strip()]
 
-    if not parts:
-        parts = ["soft ambient atmosphere", "gentle textures"]
-    elif len(parts) == 1:
-        parts.append("gentle atmospheric textures")
-
     cleaned_parts: List[str] = []
-    for part in parts[:2]:
+    for part in parts:
         words = [w for w in part.split() if w.lower().strip(".,") not in FORBIDDEN_PROMPT_WORDS]
         p = " ".join(words).strip()
         if p:
             cleaned_parts.append(p)
+
     if not cleaned_parts:
         cleaned_parts = ["soft ambient atmosphere", "gentle textures"]
-    elif len(cleaned_parts) == 1:
-        cleaned_parts.append("gentle atmospheric textures")
+
+    inferred_hints = []
+    for keywords, hint in SCENE_SOUND_HINTS:
+        if any(keyword in lowered for keyword in keywords):
+            inferred_hints.append(hint)
+            break
+
+    scene_parts = cleaned_parts[:2]
+    sound_parts = [part for part in cleaned_parts[2:] if any(word in part.lower() for word in SOUND_WORDS)]
+
+    useful_parts: List[str] = []
+    for part in scene_parts + inferred_hints + sound_parts:
+        if part.lower() not in [p.lower() for p in useful_parts]:
+            useful_parts.append(part)
 
     has_texture = any(word in lowered for word in TEXTURE_HINTS)
-    style_tail = "warm atmospheric ambience, peaceful cinematic soundscape"
+    tail = "soft atmospheric ambience, realistic environmental soundscape"
     if has_texture:
-        style_tail = "atmospheric ambience, peaceful cinematic soundscape"
-    return f"{cleaned_parts[0]}, {cleaned_parts[1]}, {style_tail}"
+        tail = "realistic environmental soundscape, no music"
+    useful_parts.append(tail)
+    return ", ".join(useful_parts[:6])[:260]
 
 
 def _score_candidate(audio: np.ndarray) -> float:
@@ -149,6 +202,18 @@ def _prepare_audio_array(audio: object) -> np.ndarray:
     return arr
 
 
+def _split_audio_candidates(audios: object) -> List[np.ndarray]:
+    if isinstance(audios, list):
+        raw_candidates = audios
+    else:
+        arr = audios.detach().float().cpu().numpy() if isinstance(audios, torch.Tensor) else np.asarray(audios)
+        if arr.ndim >= 2 and arr.shape[0] > 1:
+            raw_candidates = [arr[idx] for idx in range(arr.shape[0])]
+        else:
+            raw_candidates = [arr]
+    return [_prepare_audio_array(candidate) for candidate in raw_candidates]
+
+
 def _postprocess_with_ffmpeg(input_wav: Path, output_wav: Path, duration_s: int) -> None:
     if not input_wav.exists() or input_wav.stat().st_size < 64:
         raise RuntimeError(f"ffmpeg input wav missing or too small: {input_wav}")
@@ -157,26 +222,34 @@ def _postprocess_with_ffmpeg(input_wav: Path, output_wav: Path, duration_s: int)
     true_peak = _env_float("AUDIO_TRUE_PEAK_DB", -1.0)
     # ffmpeg alimiter.limit expects linear gain (0.0625..1.0), not dB.
     alimiter_limit = max(0.0625, min(1.0, float(10 ** (true_peak / 20.0))))
-    bass_gain = _env_float("AUDIO_BASS_GAIN_DB", 3.0)
-    stereo_widen = _env_float("AUDIO_STEREO_MLEV", 0.03)
-    reverb_delay_ms = _env_int("AUDIO_REVERB_DELAY_MS", 1000)
-    reverb_decay = _env_float("AUDIO_REVERB_DECAY", 0.3)
+    bass_gain = _env_float("AUDIO_BASS_GAIN_DB", 0.0)
+    stereo_widen = _env_float("AUDIO_STEREO_MLEV", 0.0)
+    reverb_delay_ms = _env_int("AUDIO_REVERB_DELAY_MS", 700)
+    reverb_decay = _env_float("AUDIO_REVERB_DECAY", 0.08)
 
     fade_in_d = 0.6
     fade_out_d = 1.0 if duration_s >= 5 else min(1.0, max(0.4, duration_s * 0.3))
     fade_out_start = max(0.0, duration_s - fade_out_d)
 
-    full_filter_chain = (
-        f"loudnorm=I={target_lufs}:TP={true_peak}:LRA=11,"
-        f"alimiter=limit={alimiter_limit},"
-        f"bass=g={bass_gain},"
-        f"stereotools=mlev={stereo_widen},"
-        f"aecho=0.8:0.9:{reverb_delay_ms}:{reverb_decay},"
-        f"afade=t=in:st=0:d={fade_in_d},"
-        f"afade=t=out:st={fade_out_start}:d={fade_out_d},"
-        "aresample=48000,"
-        "aformat=sample_rates=48000:channel_layouts=stereo"
+    full_filters = [
+        f"loudnorm=I={target_lufs}:TP={true_peak}:LRA=11",
+        f"alimiter=limit={alimiter_limit}",
+    ]
+    if abs(bass_gain) > 0.01:
+        full_filters.append(f"bass=g={bass_gain}")
+    if abs(stereo_widen) > 0.001:
+        full_filters.append(f"stereotools=mlev={stereo_widen}")
+    if reverb_decay > 0.001:
+        full_filters.append(f"aecho=0.65:0.25:{reverb_delay_ms}:{reverb_decay}")
+    full_filters.extend(
+        [
+            f"afade=t=in:st=0:d={fade_in_d}",
+            f"afade=t=out:st={fade_out_start}:d={fade_out_d}",
+            "aresample=48000",
+            "aformat=sample_rates=48000:channel_layouts=stereo",
+        ]
     )
+    full_filter_chain = ",".join(full_filters)
     # Minimal safe chain when optional filters are unavailable in a specific ffmpeg build.
     safe_filter_chain = (
         f"loudnorm=I={target_lufs}:TP={true_peak}:LRA=11,"
@@ -246,7 +319,7 @@ def _generate_audioldm_processed(prompt: str, duration_s: int, out_path: Path) -
             generator=generator,
         )
 
-    audios = result.audios if isinstance(result.audios, list) else [result.audios]
+    audios = _split_audio_candidates(result.audios)
     best_audio = None
     best_score = -1e9
     for idx, audio in enumerate(audios):
@@ -262,6 +335,37 @@ def _generate_audioldm_processed(prompt: str, duration_s: int, out_path: Path) -
         raw_wav = Path(td) / "raw.wav"
         arr = _prepare_audio_array(best_audio)
         sf.write(str(raw_wav), arr, 16000, format="WAV", subtype="PCM_16")
+        _postprocess_with_ffmpeg(raw_wav, out_path, duration_s)
+
+
+def _generate_tangoflux_processed(prompt: str, duration_s: int, out_path: Path) -> None:
+    model = _load_backend()
+    steps = max(10, _env_int("TANGOFLUX_STEPS", _env_int("AUDIO_INFERENCE_STEPS", 50)))
+    # TangoFlux's unguided path is broken in the published package version.
+    guidance_scale = max(1.1, _env_float("TANGOFLUX_GUIDANCE_SCALE", 4.5))
+    generation_prompt = _normalize_prompt(prompt)
+    logger.info(
+        "audio.generate.config model=declare-lab/TangoFlux prompt=%s duration_s=%s steps=%s guidance_scale=%s",
+        generation_prompt[:220],
+        duration_s,
+        steps,
+        guidance_scale,
+    )
+
+    with torch.inference_mode():
+        started = time.time()
+        audio = model.generate(
+            generation_prompt,
+            steps=steps,
+            duration=duration_s,
+            guidance_scale=guidance_scale,
+        )
+        logger.info("audio.generate.model_done backend=tangoflux duration_s=%.3f", time.time() - started)
+
+    with tempfile.TemporaryDirectory(prefix="audio-tangoflux-") as td:
+        raw_wav = Path(td) / "raw.wav"
+        arr = _prepare_audio_array(audio)
+        sf.write(str(raw_wav), arr, 44100, format="WAV", subtype="PCM_16")
         _postprocess_with_ffmpeg(raw_wav, out_path, duration_s)
 
 
@@ -292,11 +396,16 @@ def generate(req: GenerateRequest):
         str(wav_path),
         req.prompt[:120],
     )
-    if backend == "audioldm":
+    if backend in {"audioldm", "tangoflux"}:
         try:
-            _generate_audioldm_processed(req.prompt, duration_s, wav_path)
-            logger.info("audio.generate.done backend=audioldm-processed output=%s", str(wav_path))
-            return GenerateResponse(wav_path=str(wav_path), backend="audioldm-processed")
+            if backend == "tangoflux":
+                _generate_tangoflux_processed(req.prompt, duration_s, wav_path)
+                backend_name = "tangoflux-processed"
+            else:
+                _generate_audioldm_processed(req.prompt, duration_s, wav_path)
+                backend_name = "audioldm-processed"
+            logger.info("audio.generate.done backend=%s output=%s", backend_name, str(wav_path))
+            return GenerateResponse(wav_path=str(wav_path), backend=backend_name)
         except Exception as exc:
             logger.exception("audio.generate.fallback reason=%s", str(exc))
             with tempfile.TemporaryDirectory(prefix="audio-fallback-") as td:

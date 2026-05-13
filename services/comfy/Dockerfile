@@ -2,10 +2,12 @@ FROM python:3.10-slim
 
 WORKDIR /opt
 
-ARG COMFYUI_REF=4c4be1bba5ae714c6f455a49757bd7fc2e32c577
-ARG TORCH_VERSION=2.10.0
-ARG TORCHVISION_VERSION=0.25.0
-ARG TORCHAUDIO_VERSION=2.10.0
+ARG COMFYUI_REF=master
+ARG TORCH_VERSION=2.10.0+cu130
+ARG TORCHVISION_VERSION=0.25.0+cu130
+ARG TORCHAUDIO_VERSION=2.10.0+cu130
+ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu130
+ARG PYPI_INDEX_URL=https://pypi.org/simple
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -24,6 +26,8 @@ WORKDIR /opt/ComfyUI
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir --force-reinstall \
+         --index-url ${PYTORCH_INDEX_URL} \
+         --extra-index-url ${PYPI_INDEX_URL} \
          torch==${TORCH_VERSION} \
          torchvision==${TORCHVISION_VERSION} \
          torchaudio==${TORCHAUDIO_VERSION}

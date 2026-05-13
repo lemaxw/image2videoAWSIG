@@ -30,8 +30,23 @@ services:
     restart: unless-stopped
     environment:
       - AUDIO_CACHE_DIR=/cache
-      - AUDIO_MODEL_BACKEND=${AUDIO_MODEL_BACKEND:-mock}
+      - AUDIO_MODEL_BACKEND=${AUDIO_MODEL_BACKEND:-tangoflux}
       - AUDIO_DEVICE=${AUDIO_DEVICE:-cpu}
+      - AUDIO_INFERENCE_STEPS=${AUDIO_INFERENCE_STEPS:-60}
+      - AUDIO_GUIDANCE_SCALE=${AUDIO_GUIDANCE_SCALE:-3.5}
+      - AUDIO_NUM_SAMPLES=${AUDIO_NUM_SAMPLES:-3}
+      - AUDIO_SEED_BASE=${AUDIO_SEED_BASE:-42}
+      - AUDIO_TARGET_LUFS=${AUDIO_TARGET_LUFS:--14}
+      - AUDIO_TRUE_PEAK_DB=${AUDIO_TRUE_PEAK_DB:--1.0}
+      - AUDIO_BASS_GAIN_DB=${AUDIO_BASS_GAIN_DB:-0}
+      - AUDIO_STEREO_MLEV=${AUDIO_STEREO_MLEV:-0}
+      - AUDIO_REVERB_DELAY_MS=${AUDIO_REVERB_DELAY_MS:-700}
+      - AUDIO_REVERB_DECAY=${AUDIO_REVERB_DECAY:-0.08}
+      - TANGOFLUX_MODEL=${TANGOFLUX_MODEL:-declare-lab/TangoFlux}
+      - TANGOFLUX_STEPS=${TANGOFLUX_STEPS:-50}
+      - TANGOFLUX_GUIDANCE_SCALE=${TANGOFLUX_GUIDANCE_SCALE:-4.5}
+      - HF_HUB_DISABLE_XET=${HF_HUB_DISABLE_XET:-1}
+      - AUDIO_REQUEST_TIMEOUT_S=${AUDIO_REQUEST_TIMEOUT_S:-900}
     volumes:
       - ../audio/audio_service.py:/app/audio_service.py:ro
       - ${AUDIO_CACHE_DIR:-/data/audio-cache}:/cache
@@ -54,7 +69,7 @@ services:
     environment:
       - COMFY_URL=http://comfyui:8188
       - AUDIO_URL=http://audio:8000
-      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4.1-mini}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-5.4-mini}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OUTPUT_DIR=/data/outputs
       - INPUT_DIR=/data/inputs
