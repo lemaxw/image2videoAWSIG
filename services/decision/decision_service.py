@@ -3,12 +3,66 @@ import hashlib
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict
 
+import httpx
 from openai import OpenAI
 
 from services.orchestrator.validate import validate_and_clamp_decision
+
+try:
+    from image2json.analyzer import ImageAnalyzer
+    from image2json.config import AnalysisConfig
+    IMAGE2JSON_AVAILABLE = True
+except ImportError:
+    IMAGE2JSON_AVAILABLE = False
+
+
+def _decision_step_log(event: str, step: str, **fields: Any) -> None:
+    payload = {
+        "level": "INFO" if event != "failed" else "ERROR",
+        "msg": f"decision.{step}.{event}",
+        "step": step,
+        "event": event,
+        "time": int(time.time()),
+    }
+    payload.update(fields)
+    print(json.dumps(payload, ensure_ascii=True), flush=True)
+
+
+def _ollama_unload_model(ollama_url: str, model: str, *, reason: str, timeout: float = 30) -> Dict[str, Any]:
+    started = time.time()
+    _decision_step_log("start", "ollama_unload", model=model, reason=reason, url=ollama_url)
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            response = client.post(
+                f"{ollama_url.rstrip('/')}/api/generate",
+                json={"model": model, "prompt": "", "stream": False, "keep_alive": 0},
+            )
+            response.raise_for_status()
+            result = {"status_code": response.status_code}
+            _decision_step_log(
+                "done",
+                "ollama_unload",
+                model=model,
+                reason=reason,
+                duration_s=round(time.time() - started, 3),
+                result=result,
+            )
+            return result
+    except Exception as exc:
+        error = {"error": str(exc), "error_type": exc.__class__.__name__}
+        _decision_step_log(
+            "failed",
+            "ollama_unload",
+            model=model,
+            reason=reason,
+            duration_s=round(time.time() - started, 3),
+            **error,
+        )
+        return error
 
 DECISION_SCHEMA: Dict[str, Any] = {
     # Hard contract enforced through Responses API structured outputs.
@@ -328,6 +382,477 @@ When uncertain:
 prefer the most visually appealing final video while protecting composition and identity.
 """
 
+TEXT_MODEL_SYSTEM_PROMPT = """You are a local decision model that selects the best image-to-video treatment for one image.
+
+You will receive one JSON object produced by image2json. It contains general image analysis, including scene, subjects, objects, spatial_map, dynamic_potential, style, composition, text, reframe_constraints, content_complexity, framing_risks, generation_risks, and confidence.
+
+Your task:
+Analyze the provided JSON and return one decision JSON object that matches the application DECISION_SCHEMA.
+
+You must base the decision only on the provided image2json data.
+Do not invent invisible image details.
+Do not add explanations outside the JSON.
+Do not use markdown fences.
+Return valid JSON only.
+
+================================================
+OUTPUT CONTRACT
+================================================
+
+Top-level keys must be exactly:
+
+{
+  "scene": {},
+  "framing": {},
+  "video": {},
+  "audio": {},
+  "fallbacks": []
+}
+
+No extra top-level keys.
+
+Required structure:
+
+{
+  "scene": {
+    "tags": [],
+    "has_people": false,
+    "confidence": 0.0
+  },
+  "framing": {
+    "target_aspect": "instagram_reel_9_16",
+    "crop_anchor": "center_center"
+  },
+  "video": {
+    "preset": "HUNYUAN15_I2V_720P",
+    "duration_s": 5,
+    "fps": 24,
+    "frames": 120,
+    "resolution_width": 720,
+    "seed": 0,
+    "params": {
+      "prompt": "",
+      "negative_prompt": "",
+      "use_original_input_for_video": false,
+      "output_aspect": "instagram_reel_9_16",
+      "camera_motion": "",
+      "motion_strength": ""
+    }
+  },
+  "audio": {
+    "prompt": "",
+    "duration_s": 5,
+    "mix_db": -12.0
+  },
+  "fallbacks": []
+}
+
+The `fallbacks` array must contain exactly 2 video objects.
+Each fallback video object must use the same structure as `video`.
+Fallbacks must use presets from different backend families when possible.
+
+================================================
+VALID ENUMS
+================================================
+
+Valid video.preset values:
+
+- HUNYUAN15_I2V_720P
+- HUNYUAN15_I2V_FAST
+- SVD_SUBTLE
+- SVD_STRONG
+- ANIMATEDIFF_GRASS_WIND
+- ANIMATEDIFF_CITY_PULSE
+
+Valid framing.crop_anchor values:
+
+- left_top
+- center_top
+- right_top
+- left_center
+- center_center
+- right_center
+- left_bottom
+- center_bottom
+- right_bottom
+
+Valid video.params.output_aspect values:
+
+- instagram_reel_9_16
+- square_1_1
+- original
+
+Valid video.params.motion_strength values:
+
+- very_low
+- low
+- medium
+- high
+
+================================================
+PRESET MEANING
+================================================
+
+HUNYUAN15_I2V_720P:
+Use for premium realistic/cinematic output. Good for landscapes, architecture, travel, people, products, and realistic scenes when artifact risk is acceptable.
+
+HUNYUAN15_I2V_FAST:
+Use when the scene is realistic but dense, complex, expensive, or likely to need a safer/lighter Hunyuan option.
+
+ANIMATEDIFF_GRASS_WIND:
+Use for outdoor/nature/anime-style atmosphere involving foliage, grass, trees, clouds, dreamy scenery, or gentle wind.
+
+ANIMATEDIFF_CITY_PULSE:
+Use for urban/anime-style atmosphere involving city streets, neon, rain, nightlife, reflections, traffic, or energetic city mood.
+
+SVD_STRONG:
+Use for dramatic atmospheric reinterpretation when motion potential is high and the scene contains cinematic elements such as ocean, sunset, fog, haze, dramatic sky, reflections, particles, smoke, or glowing light.
+
+SVD_SUBTLE:
+Use as the safest stability-first option when the image contains fragile details such as faces, readable text, logos, dense architecture, complex geometry, low-detail noisy regions, or strong framing/generation risks.
+
+================================================
+DECISION PRIORITIES
+================================================
+
+Choose the best preset by balancing these priorities in order:
+
+1. Preserve the visible image story.
+2. Avoid likely visual artifacts.
+3. Match the scene type and style.
+4. Use natural motion opportunities from the image2json data.
+5. Prefer high quality when risk is acceptable.
+6. Use fallbacks to cover alternative safe strategies.
+
+Do not blindly choose the first preset in the preference order.
+The preference order is only a tie-breaker after risk and scene fit are considered.
+
+Tie-breaker preference order:
+
+1. HUNYUAN15_I2V_720P
+2. HUNYUAN15_I2V_FAST
+3. ANIMATEDIFF_GRASS_WIND
+4. ANIMATEDIFF_CITY_PULSE
+5. SVD_STRONG
+6. SVD_SUBTLE
+
+================================================
+SCENE FIELD RULES
+================================================
+
+scene.tags:
+Return 5 to 8 lowercase keywords.
+Use short tags based on visible content, environment, mood, style, and important objects.
+Do not include backend names or technical settings.
+
+scene.has_people:
+true if image2json.people is non-empty, or if subjects/objects indicate visible people.
+false otherwise.
+
+scene.confidence:
+Use image2json.confidence.overall if available.
+Otherwise infer from available confidence values.
+Clamp to 0.0–1.0.
+
+================================================
+FRAMING RULES
+================================================
+
+target_aspect:
+Always set to "instagram_reel_9_16" unless vertical_crop_risk is "high" and the image story would be damaged by a vertical crop. Even then, keep framing.target_aspect as "instagram_reel_9_16"; put the safer output aspect in video.params.output_aspect.
+
+crop_anchor:
+Use spatial_map.primary_regions when available.
+
+Choose the most important region:
+- Prefer regions with importance "primary".
+- If multiple primary regions exist, prefer the one that best represents the image story.
+- If important regions are spread across the full image, use center_center.
+- If people are present and important, prefer the anchor that keeps people visible.
+- If uncertain, use center_center.
+
+Map the selected region center to a 3x3 grid:
+
+x < 0.33 -> left
+0.33 <= x <= 0.66 -> center
+x > 0.66 -> right
+
+y < 0.33 -> top
+0.33 <= y <= 0.66 -> center
+y > 0.66 -> bottom
+
+Combine as:
+left_top, center_top, right_top,
+left_center, center_center, right_center,
+left_bottom, center_bottom, right_bottom.
+
+Wide composition:
+If reframe_constraints.wide_composition is true, or full_width_important_content is true, or vertical_crop_risk is "high":
+- Prefer crop_anchor center_center unless a clear subject region is dominant.
+- Set video.params.use_original_input_for_video = true.
+- Set video.params.output_aspect = "square_1_1" if vertical crop would lose the main story.
+- Prefer "square_1_1" over "original" for panoramas, broad landscapes, or wide scenes where a 9:16 crop would be too narrow or would add padding/margins.
+- Use "original" only when the input explicitly requires a full original-aspect export and no square or vertical crop can preserve the story.
+- Describe slow lateral camera travel or gentle push-in instead of aggressive reframing.
+
+People/framing safety:
+- Treat people/faces as major artifact risks only when they are important to the final frame: large or medium size, central, primary subjects, or likely to remain visible after the chosen crop/pan.
+- If people are tiny, partial, peripheral, or likely to be outside the final crop/pan, do not let face risk alone force SVD_SUBTLE.
+- Avoid implying tight crops around people if people are tiny, partial, or near edges.
+- If important people remain near image edges, prefer safer framing and lower motion strength.
+
+================================================
+PRESET SELECTION RULES
+================================================
+
+First detect risk level.
+
+High risk if any of these are true:
+- text.has_visible_text is true
+- content_complexity.faces is true and faces are important to the final frame
+- content_complexity.dense_details is true and level is "high"
+- framing_risks is non-empty and affects important final-frame subjects
+- generation_risks is non-empty and affects important final-frame subjects
+- spatial_map.safe_reframe_difficulty is "high"
+- reframe_constraints.vertical_crop_risk is "high"
+
+Medium risk if:
+- dense details are present
+- readable text exists but is small/peripheral
+- important subjects touch edges
+- scene contains architecture, crowds, fine geometry, watermarks, or complex patterns
+
+Low risk if:
+- no visible text
+- no important final-frame faces/hands
+- no major framing risks
+- clear subject/background separation
+- simple natural scene
+
+Preset choice:
+
+Use SVD_SUBTLE when:
+- risk is high and the final frame contains important fragile content, readable text, faces, logos, or dense detail
+- or the source image is too fragile for strong motion
+
+Use HUNYUAN15_I2V_FAST when:
+- scene is realistic
+- quality matters
+- but content complexity or density suggests a safer/lighter realistic preset
+
+Use HUNYUAN15_I2V_720P when:
+- scene is realistic/cinematic/travel/landscape/architecture/product/portrait
+- risk is low or medium
+- motion can be restrained and natural
+
+Use ANIMATEDIFF_GRASS_WIND when:
+- scene is outdoor/nature/forest/grass/trees/mountains/clouds
+- dynamic_potential includes wind, foliage, grass, clouds, atmospheric motion
+- anime/stylized outdoor output is acceptable
+- tiny or peripheral people may be present, as long as important final-frame faces/text/logos do not dominate the risk
+
+Use ANIMATEDIFF_CITY_PULSE when:
+- scene is urban/city/street/night/neon/rain/reflections
+- style or scene suggests city energy
+
+Use SVD_STRONG when:
+- dynamic_potential.level is "high"
+- scene contains dramatic sky, ocean, sunset, fog, haze, particles, reflections, smoke, or glowing light
+- no fragile people/text/logo risks dominate
+
+For realistic travel/landscape images:
+- Prefer HUNYUAN15_I2V_720P if risk is acceptable.
+- Prefer HUNYUAN15_I2V_FAST if the image is dense or wide with many details.
+- Prefer ANIMATEDIFF_GRASS_WIND as a fallback for outdoor/nature scenes with natural wind/foliage/cloud motion when no important final-frame faces/text/logos dominate.
+- Prefer SVD_SUBTLE if visible text/watermark, important faces, or important geometry risk dominates the final frame.
+
+================================================
+VIDEO PARAMS RULES
+================================================
+
+video.duration_s:
+Use 5 by default.
+Use 3 for high-risk images, dense scenes, text-heavy images, or fragile portraits.
+
+video.fps:
+Use 24 unless the schema or application requires another value.
+
+video.frames:
+frames = duration_s * fps.
+
+video.resolution_width:
+Use 720 by default.
+
+video.seed:
+Use an integer.
+If no seed is provided in the input, use 0.
+
+video.params.prompt:
+Max 300 characters.
+Base it on:
+- image2json.summary
+- image2json.detailed_description
+- dynamic_potential.natural_motion_elements
+- dynamic_potential.camera_motion_affordances
+- scene mood/style/lighting
+
+The prompt should:
+- describe the visible scene
+- request natural, restrained motion
+- preserve original composition and identity of visible subjects
+- include camera motion if useful
+- avoid mentioning backend names
+
+video.params.negative_prompt:
+Max 220 characters.
+Mention risks relevant to the image:
+- warped faces
+- distorted text
+- geometry wobble
+- flicker
+- melting details
+- extra people/objects
+- unstable architecture
+- over-strong motion
+
+video.params.camera_motion:
+Choose a short phrase such as:
+- "slow push-in"
+- "gentle lateral drift"
+- "subtle parallax"
+- "locked camera with atmospheric motion"
+- "slow reveal"
+- "minimal stabilized motion"
+
+video.params.motion_strength:
+Use:
+- very_low for fragile/high-risk images
+- low for text, people, dense details, architecture, or wide compositions
+- medium for normal realistic scenes
+- high only for dramatic scenes with high dynamic potential and low artifact risk
+
+video.params.use_original_input_for_video:
+true when preserving the original full image is safer than cropping/reframing.
+Set true for wide compositions with important content spread across the image.
+Otherwise false.
+
+video.params.output_aspect:
+- "instagram_reel_9_16" when vertical treatment is safe
+- "square_1_1" when vertical crop risk is high, a pan/crop would be too narrow, or preserving a wide story matters
+- "original" only when the input explicitly requires original-aspect final export and neither 9:16 nor 1:1 can preserve the story
+
+================================================
+AUDIO RULES
+================================================
+
+audio.prompt:
+Max 96 characters.
+Format:
+"<environment>, <mood or texture>, cinematic ambience"
+
+Use scene.environment, scene.mood, weather, and style.color_palette when available.
+Do not mention backend names.
+Do not include more than one sentence.
+
+audio.duration_s:
+Match video.duration_s.
+
+audio.mix_db:
+Use -12.0 by default.
+Use -14.0 for calm/serene scenes.
+Use -10.0 for energetic city/dramatic scenes.
+
+================================================
+FALLBACK RULES
+================================================
+
+Return exactly 2 fallback video objects.
+
+Fallbacks must:
+- use different preset families when possible:
+  - Hunyuan family: HUNYUAN15_I2V_720P, HUNYUAN15_I2V_FAST
+  - SVD family: SVD_SUBTLE, SVD_STRONG
+  - AnimateDiff family: ANIMATEDIFF_GRASS_WIND, ANIMATEDIFF_CITY_PULSE
+- not duplicate the primary video.preset
+- use the same duration/fps/frame logic
+- use safer motion than the primary when risk is medium or high
+- keep prompts consistent with the visible image
+
+Recommended fallback strategy:
+- If primary is HUNYUAN15_I2V_720P:
+  fallback 1: HUNYUAN15_I2V_FAST only if allowed by schema preference, otherwise SVD_SUBTLE
+  fallback 2: ANIMATEDIFF_GRASS_WIND for nature/outdoor/wide landscape when important final-frame faces/text/logos do not dominate, ANIMATEDIFF_CITY_PULSE for city/urban, otherwise SVD_SUBTLE
+- If primary is HUNYUAN15_I2V_FAST:
+  fallback 1: HUNYUAN15_I2V_720P if risk is not high, otherwise SVD_SUBTLE
+  fallback 2: appropriate AnimateDiff preset if scene matches and fragile final-frame details do not dominate, otherwise SVD_SUBTLE
+- If primary is SVD_SUBTLE:
+  fallback 1: HUNYUAN15_I2V_FAST
+  fallback 2: appropriate AnimateDiff preset if scene matches, otherwise SVD_STRONG
+- If primary is SVD_STRONG:
+  fallback 1: HUNYUAN15_I2V_720P
+  fallback 2: SVD_SUBTLE
+- If primary is ANIMATEDIFF_GRASS_WIND:
+  fallback 1: HUNYUAN15_I2V_720P
+  fallback 2: HUNYUAN15_I2V_FAST when realistic fallback quality matters, otherwise SVD_SUBTLE
+- If primary is ANIMATEDIFF_CITY_PULSE:
+  fallback 1: HUNYUAN15_I2V_720P
+  fallback 2: HUNYUAN15_I2V_FAST when realistic fallback quality matters, otherwise SVD_SUBTLE
+
+If a fallback would duplicate the primary preset, choose the safest non-duplicate alternative.
+
+================================================
+CONSISTENCY CHECKS BEFORE RETURNING
+================================================
+
+Before returning, verify:
+
+- Output is valid JSON.
+- No markdown fences.
+- Top-level keys are exactly: scene, framing, video, audio, fallbacks.
+- scene.tags contains 5 to 8 strings.
+- framing.crop_anchor is one of the valid enum values.
+- video.preset is one of the valid enum values.
+- video.duration_s is either 3 or 5.
+- video.frames equals video.duration_s * video.fps.
+- audio.duration_s equals video.duration_s.
+- audio.prompt is 96 characters or less.
+- video.params.prompt is 300 characters or less.
+- fallbacks contains exactly 2 video objects.
+- fallback presets do not duplicate the primary preset.
+- All decisions are based on the provided image2json input.
+
+Return JSON only.
+"""
+
+
+def _call_ollama_text_model(ollama_url: str, model: str, prompt: str, json_input: Dict[str, Any], schema: Dict[str, Any], timeout: float = 300) -> str:
+    """Call Ollama text model with JSON input and schema, return the response."""
+    full_prompt = f"""{prompt}
+
+JSON Schema for output:
+{json.dumps(schema, indent=2)}
+
+Image analysis JSON:
+{json.dumps(json_input, indent=2)}
+
+Return JSON only. No markdown fences, no extra text."""
+
+    payload = {
+        "model": model,
+        "prompt": full_prompt,
+        "stream": False,
+        "format": "json",
+        "think": False,
+        "keep_alive": 0,
+        "options": {"temperature": 0},
+    }
+
+    with httpx.Client(timeout=timeout) as client:
+        response = client.post(f"{ollama_url.rstrip('/')}/api/generate", json=payload)
+        response.raise_for_status()
+        result = response.json()
+    return result.get("response", "")
+
 
 def _fallback_decision_payload() -> Dict[str, Any]:
     return {
@@ -563,6 +1088,134 @@ def decide_for_image_detailed(image_path: Path, metadata: Dict[str, Any] | None 
         "attempts": [],
     }
 
+    # Try image2json + text model two-step flow if enabled and available
+    image2json_enabled = os.environ.get("IMAGE2JSON_ENABLED", "true").lower() == "true"
+    if image2json_enabled and IMAGE2JSON_AVAILABLE:
+        try:
+            ollama_url = os.environ.get("IMAGE2JSON_URL", "http://host.docker.internal:11434")
+            image2json_model = os.environ.get("IMAGE2JSON_MODEL", "qwen3-vl:8b")
+            text_model = os.environ.get("IMAGE2JSON_TEXT_MODEL", "qwen3:14b")
+            timeout = float(os.environ.get("IMAGE2JSON_TIMEOUT", "300"))
+            if image2json_model == text_model or "vl" not in image2json_model.lower():
+                raise RuntimeError(
+                    "IMAGE2JSON_MODEL must be the vision model qwen3-vl:8b for this pipeline; "
+                    f"got IMAGE2JSON_MODEL={image2json_model!r}, IMAGE2JSON_TEXT_MODEL={text_model!r}"
+                )
+
+            # Step 1: Get image analysis from image2json (vision model)
+            config = AnalysisConfig(
+                model=image2json_model,
+                ollama_url=ollama_url,
+                timeout=timeout,
+                short_version=False,  # Use full analysis
+            )
+            vision_started = time.time()
+            _decision_step_log(
+                "start",
+                "image2json_vision",
+                model=image2json_model,
+                url=ollama_url,
+                image_path=str(image_path),
+                timeout_s=timeout,
+            )
+            try:
+                analyzer = ImageAnalyzer(config)
+                analysis = analyzer.analyze_path(image_path)
+                _decision_step_log(
+                    "done",
+                    "image2json_vision",
+                    model=image2json_model,
+                    duration_s=round(time.time() - vision_started, 3),
+                    result={"analysis_type": analysis.__class__.__name__},
+                )
+            except Exception as exc:
+                _decision_step_log(
+                    "failed",
+                    "image2json_vision",
+                    model=image2json_model,
+                    duration_s=round(time.time() - vision_started, 3),
+                    error=str(exc),
+                    error_type=exc.__class__.__name__,
+                )
+                raise
+            finally:
+                _ollama_unload_model(ollama_url, image2json_model, reason="after_image2json_vision")
+
+            # Convert analysis to dict for text model
+            analysis_dict = analysis.model_dump() if hasattr(analysis, "model_dump") else str(analysis)
+
+            # Step 2: Pass analysis to text model for decision
+            text_started = time.time()
+            _decision_step_log(
+                "start",
+                "decision_text_model",
+                model=text_model,
+                url=ollama_url,
+                analysis_model=image2json_model,
+                timeout_s=timeout,
+            )
+            try:
+                text_response = _call_ollama_text_model(
+                    ollama_url=ollama_url,
+                    model=text_model,
+                    prompt=TEXT_MODEL_SYSTEM_PROMPT,
+                    json_input=analysis_dict,
+                    schema=DECISION_SCHEMA,
+                    timeout=timeout,
+                )
+                parsed_decision = json.loads(_strip_json_fences(text_response))
+                decision = _coerce_decision_shape(parsed_decision)
+                _decision_step_log(
+                    "done",
+                    "decision_text_model",
+                    model=text_model,
+                    duration_s=round(time.time() - text_started, 3),
+                    result={
+                        "preset": (decision.get("video") or {}).get("preset"),
+                        "fallbacks": [fb.get("preset") for fb in decision.get("fallbacks", []) if isinstance(fb, dict)],
+                    },
+                )
+            except Exception as exc:
+                _decision_step_log(
+                    "failed",
+                    "decision_text_model",
+                    model=text_model,
+                    duration_s=round(time.time() - text_started, 3),
+                    error=str(exc),
+                    error_type=exc.__class__.__name__,
+                )
+                raise
+            finally:
+                _ollama_unload_model(ollama_url, text_model, reason="after_decision_text_model")
+
+            return {
+                "decision": validate_and_clamp_decision(decision),
+                "openai": {
+                    "model": model,
+                    "attempts": 0,
+                    "usage": usage_acc,
+                    "status": "skipped_image2json_used",
+                    "io": io_payload_base,
+                },
+                "image2json": {
+                    "enabled": True,
+                    "used": True,
+                    "model": image2json_model,
+                    "vision_model": image2json_model,
+                    "text_model": text_model,
+                    "analysis": analysis_dict,
+                    "text_response": text_response,
+                },
+            }
+        except Exception as exc:
+            # Exit on image2json error instead of falling back
+            print(f"image2json decision failed: {exc.__class__.__name__}: {exc}")
+            raise
+    elif image2json_enabled and not IMAGE2JSON_AVAILABLE:
+        # image2json enabled but not installed - exit instead of fallback
+        print("image2json is enabled but package is not installed")
+        raise RuntimeError("image2json package not installed")
+
     if not api_key:
         return {
             "decision": validate_and_clamp_decision(_fallback_decision_payload()),
@@ -572,6 +1225,10 @@ def decide_for_image_detailed(image_path: Path, metadata: Dict[str, Any] | None 
                 "usage": usage_acc,
                 "status": "skipped_no_api_key",
                 "io": io_payload_base,
+            },
+            "image2json": {
+                "enabled": image2json_enabled,
+                "used": False,
             },
         }
 
@@ -588,6 +1245,10 @@ def decide_for_image_detailed(image_path: Path, metadata: Dict[str, Any] | None 
                 "error": str(exc),
                 "error_type": exc.__class__.__name__,
                 "io": io_payload_base,
+            },
+            "image2json": {
+                "enabled": image2json_enabled,
+                "used": False,
             },
         }
 
@@ -714,6 +1375,10 @@ def decide_for_image_detailed(image_path: Path, metadata: Dict[str, Any] | None 
                         "status": status,
                         "io": io_payload,
                     },
+                    "image2json": {
+                        "enabled": image2json_enabled,
+                        "used": False,
+                    },
                 }
             except Exception:
                 if attempt == 3:
@@ -730,6 +1395,10 @@ def decide_for_image_detailed(image_path: Path, metadata: Dict[str, Any] | None 
                 "error_type": exc.__class__.__name__,
                 "io": io_payload,
             },
+            "image2json": {
+                "enabled": image2json_enabled,
+                "used": False,
+            },
         }
 
     return {
@@ -740,6 +1409,10 @@ def decide_for_image_detailed(image_path: Path, metadata: Dict[str, Any] | None 
             "usage": usage_acc,
             "status": "fallback_unknown",
             "io": io_payload,
+        },
+        "image2json": {
+            "enabled": image2json_enabled,
+            "used": False,
         },
     }
 

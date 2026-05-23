@@ -71,16 +71,27 @@ services:
       - AUDIO_URL=http://audio:8000
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-5.4-mini}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - IMAGE2JSON_ENABLED=${IMAGE2JSON_ENABLED:-true}
+      - IMAGE2JSON_URL=${IMAGE2JSON_URL:-http://host.docker.internal:11434}
+      - IMAGE2JSON_MODEL=${IMAGE2JSON_MODEL:-qwen3-vl:8b}
+      - IMAGE2JSON_TEXT_MODEL=${IMAGE2JSON_TEXT_MODEL:-qwen3:14b}
+      - IMAGE2JSON_TIMEOUT=${IMAGE2JSON_TIMEOUT:-300}
+      - MODEL_SERVICE_CONTROL=${MODEL_SERVICE_CONTROL:-docker}
+      - AUDIO_CONTAINER_NAME=${AUDIO_CONTAINER_NAME:-pipeline-audio}
+      - COMFY_CONTAINER_NAME=${COMFY_CONTAINER_NAME:-pipeline-comfyui}
       - OUTPUT_DIR=/data/outputs
       - INPUT_DIR=/data/inputs
+      - PYTHONPATH=/app:/app/image2json/src
     volumes:
       - ../..:/app
+      - /home/lemaxw/hobby/image2json:/app/image2json:ro
       - ${OUTPUT_DIR:-/data/outputs}:/data/outputs
       - ${MODEL_DIR:-/data/models}:/data/models
       - shared_inputs:/data/inputs
       - ${LOCAL_INPUT_DIR:-/tmp/local_inputs}:/data/local_inputs
       - ${LOCAL_OUTPUT_DIR:-/tmp/local_outputs}:/data/local_outputs
       - /tmp:/tmp
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       comfyui:
         condition: service_started

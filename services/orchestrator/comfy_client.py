@@ -201,6 +201,34 @@ class ComfyClient:
             time.sleep(3)
         raise TimeoutError(f"Comfy prompt timed out: {prompt_id}")
 
+    def diagnostics(self, prompt_id: str | None = None) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        checks = [("queue", "/queue"), ("system_stats", "/system_stats")]
+        if prompt_id:
+            checks.insert(1, ("history", f"/history/{prompt_id}"))
+        for key, path in checks:
+            try:
+                out[key] = self._request_json("GET", path, timeout=10)
+            except Exception as exc:
+                out[key] = {"error": str(exc), "error_type": exc.__class__.__name__}
+        return out
+
+    def free_memory(self, *, unload_models: bool = True, free_memory: bool = True) -> Dict[str, Any]:
+        payload = {"unload_models": unload_models, "free_memory": free_memory}
+        url = f"{self.base_url}/free"
+        try:
+            resp = self.session.post(url, json=payload, timeout=30)
+            if resp.status_code >= 400:
+                return {"error": resp.text[:1200], "status_code": resp.status_code}
+            if not resp.text.strip():
+                return {"status_code": resp.status_code, "payload": payload}
+            try:
+                return resp.json()
+            except ValueError:
+                return {"status_code": resp.status_code, "text": resp.text[:1200], "payload": payload}
+        except Exception as exc:
+            return {"error": str(exc), "error_type": exc.__class__.__name__, "payload": payload}
+
     @staticmethod
     def _render_template(template_path: Path, substitutions: Dict[str, Any]) -> Dict[str, Any]:
         # Workflow JSON templates use placeholder tokens for runtime injection.

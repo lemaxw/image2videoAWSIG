@@ -1,4 +1,5 @@
 import math
+import gc
 import logging
 import os
 import shutil
@@ -100,6 +101,30 @@ def _load_backend():
         _PIPE = _PIPE.to(device_name)
         logger.info("audio.backend.ready backend=audioldm duration_s=%.3f", time.time() - started)
     return _PIPE
+
+
+def _unload_backend() -> dict:
+    global _PIPE
+    had_pipe = _PIPE is not None
+    started = time.time()
+    if _PIPE is not None:
+        del _PIPE
+        _PIPE = None
+    gc.collect()
+    cuda_available = torch.cuda.is_available()
+    if cuda_available:
+        torch.cuda.empty_cache()
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+    result = {
+        "unloaded": had_pipe,
+        "cuda_available": cuda_available,
+        "duration_s": round(time.time() - started, 3),
+    }
+    logger.info("audio.backend.unload.done unloaded=%s cuda_available=%s duration_s=%.3f", had_pipe, cuda_available, result["duration_s"])
+    return result
 
 
 def _mock_audio(prompt: str, duration_s: int, out_path: Path) -> None:
@@ -372,6 +397,12 @@ def _generate_tangoflux_processed(prompt: str, duration_s: int, out_path: Path) 
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.post("/unload")
+def unload():
+    logger.info("audio.backend.unload.start")
+    return _unload_backend()
 
 
 @app.on_event("startup")

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -108,6 +109,45 @@ def _boost_svd_for_scene(video_cfg: Dict[str, Any], scene: Dict[str, Any]) -> Di
     return validate_and_clamp_decision({"scene": scene, "video": out, "fallbacks": []})["video"]
 
 
+def _prepare_selected_video_variant(video_cfg: Dict[str, Any], decision: Dict[str, Any]) -> Dict[str, Any]:
+    target_aspect = str((decision.get("framing") or {}).get("target_aspect", ""))
+    if not target_aspect:
+        return video_cfg
+
+    scene = decision.get("scene") if isinstance(decision.get("scene"), dict) else {}
+    params = video_cfg.get("params") if isinstance(video_cfg.get("params"), dict) else {}
+    if _uses_original_pan(video_cfg, decision):
+        params.pop("target_aspect", None)
+        params.setdefault("pan_direction", "left_to_right")
+        if _scene_prefers_square_pan(scene, video_cfg):
+            params.setdefault("output_aspect", "square_1_1")
+        params["use_original_input_for_video"] = True
+        video_cfg["params"] = params
+        return video_cfg
+
+    params["target_aspect"] = target_aspect
+    video_cfg["params"] = params
+    return video_cfg
+
+
+def _planned_variant_entry(video_cfg: Dict[str, Any]) -> Dict[str, str]:
+    return {"variant": _variant_key_for_preset(str(video_cfg.get("preset", ""))), "preset": str(video_cfg.get("preset", ""))}
+
+
+def _enqueue_next_decision_fallback(video_candidates: List[Dict[str, Any]], decision: Dict[str, Any], insert_at: int) -> Dict[str, Any] | None:
+    existing_presets = {str(cfg.get("preset", "")) for cfg in video_candidates if isinstance(cfg, dict)}
+    for candidate in decision.get("fallbacks") or []:
+        if not isinstance(candidate, dict):
+            continue
+        preset = str(candidate.get("preset", ""))
+        if not preset or preset in existing_presets:
+            continue
+        prepared = _prepare_selected_video_variant(candidate, decision)
+        video_candidates.insert(insert_at, prepared)
+        return prepared
+    return None
+
+
 def _video_variants_for_decision(decision: Dict[str, Any], requested: str = "all") -> List[Dict[str, Any]]:
     requested = str(requested or "selected_pair").lower()
     scene = decision.get("scene") if isinstance(decision.get("scene"), dict) else {}
@@ -131,20 +171,8 @@ def _video_variants_for_decision(decision: Dict[str, Any], requested: str = "all
             fallback_family = "animatediff" if primary_family == "hunyuan" else "hunyuan"
             selected.append(_default_video_for_family(fallback_family, scene))
 
-    target_aspect = str((decision.get("framing") or {}).get("target_aspect", ""))
-    if target_aspect:
-        for cfg in selected:
-            params = cfg.get("params") if isinstance(cfg.get("params"), dict) else {}
-            if _uses_original_pan(cfg, decision):
-                params.pop("target_aspect", None)
-                params.setdefault("pan_direction", "left_to_right")
-                if _scene_prefers_square_pan(scene, cfg):
-                    params.setdefault("output_aspect", "square_1_1")
-                params["use_original_input_for_video"] = True
-                cfg["params"] = params
-                continue
-            params["target_aspect"] = target_aspect
-            cfg["params"] = params
+    for cfg in selected:
+        _prepare_selected_video_variant(cfg, decision)
     return selected
 
 
@@ -165,7 +193,10 @@ def _scene_prefers_square_pan(scene: Dict[str, Any], video_cfg: Dict[str, Any]) 
 def _uses_original_pan(video_cfg: Dict[str, Any], decision: Dict[str, Any]) -> bool:
     params = video_cfg.get("params") if isinstance(video_cfg.get("params"), dict) else {}
     scene = decision.get("scene") if isinstance(decision.get("scene"), dict) else {}
-    return bool(params.get("use_original_input_for_video")) or _scene_suggests_original_pan(scene, video_cfg)
+    preset = str(video_cfg.get("preset", ""))
+    output_aspect = str(params.get("output_aspect", "")).strip().lower()
+    hunyuan_square = preset.startswith("HUNYUAN15_") and output_aspect == "square_1_1"
+    return bool(params.get("use_original_input_for_video")) or hunyuan_square or _scene_suggests_original_pan(scene, video_cfg)
 
 
 def _render_input_for_video(video_cfg: Dict[str, Any], decision: Dict[str, Any], original_input: Path, cropped_input: Path) -> tuple[Path, str]:
@@ -175,7 +206,7 @@ def _render_input_for_video(video_cfg: Dict[str, Any], decision: Dict[str, Any],
 
 
 def _video_fit_for_attempt(video_cfg: Dict[str, Any], decision: Dict[str, Any], render_input_mode: str) -> str:
-    if render_input_mode != "original" or not str(video_cfg.get("preset", "")).startswith("HUNYUAN15_"):
+    if render_input_mode != "original":
         return "contain"
     params = video_cfg.get("params") if isinstance(video_cfg.get("params"), dict) else {}
     direction = str(params.get("pan_direction", "left_to_right")).strip().lower()
@@ -196,7 +227,7 @@ def _output_aspect_for_attempt(video_cfg: Dict[str, Any], decision: Dict[str, An
 
 
 def _pan_window_for_attempt(video_cfg: Dict[str, Any], decision: Dict[str, Any], render_input_mode: str) -> tuple[float, float]:
-    if render_input_mode != "original" or not str(video_cfg.get("preset", "")).startswith("HUNYUAN15_"):
+    if render_input_mode != "original":
         return 0.0, 1.0
     params = video_cfg.get("params") if isinstance(video_cfg.get("params"), dict) else {}
     scene = decision.get("scene") if isinstance(decision.get("scene"), dict) else {}
@@ -266,6 +297,31 @@ def _log(level: str, msg: str, **fields: Any) -> None:
     fn(msg, extra={"extra": fields})
 
 
+def _step_start(step: str, **fields: Any) -> float:
+    _log("info", "step.start", step=step, **fields)
+    return time.time()
+
+
+def _step_done(step: str, started: float, result: Dict[str, Any] | None = None, **fields: Any) -> None:
+    payload = dict(fields)
+    payload["duration_s"] = round(time.time() - started, 3)
+    if result is not None:
+        payload["result"] = result
+    _log("info", "step.done", step=step, **payload)
+
+
+def _step_failed(step: str, started: float, exc: Exception, **fields: Any) -> None:
+    _log(
+        "error",
+        "step.failed",
+        step=step,
+        duration_s=round(time.time() - started, 3),
+        error=str(exc),
+        error_type=exc.__class__.__name__,
+        **fields,
+    )
+
+
 class LocalIO:
     def __init__(self, input_dir: Path, output_dir: Path):
         self.input_dir = input_dir.resolve()
@@ -308,6 +364,140 @@ def _audio_generate(audio_url: str, prompt: str, duration_s: int, output_dir: Pa
     resp.raise_for_status()
     data = resp.json()
     return {"wav_path": data["wav_path"], "backend": data.get("backend", "unknown")}
+
+
+def _audio_unload(audio_url: str) -> Dict[str, Any]:
+    try:
+        resp = requests.post(f"{audio_url}/unload", timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        return {"error": str(exc), "error_type": exc.__class__.__name__}
+
+
+def _docker_container_request(container_name: str, action: str, timeout_s: int = 45) -> Dict[str, Any]:
+    docker_sock = os.environ.get("DOCKER_SOCKET", "/var/run/docker.sock")
+    if not Path(docker_sock).exists():
+        return {"skipped": True, "reason": "docker_socket_missing", "socket": docker_sock}
+    if action not in {"start", "stop"}:
+        return {"error": f"unsupported docker action: {action}", "error_type": "ValueError"}
+
+    url = f"http://localhost/containers/{container_name}/{action}"
+    if action == "stop":
+        url += "?t=30"
+    cmd = ["curl", "-sS", "-o", "-", "-w", "\n%{http_code}", "--unix-socket", docker_sock, "-X", "POST", url]
+    try:
+        proc = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout_s)
+    except Exception as exc:
+        return {"error": str(exc), "error_type": exc.__class__.__name__, "action": action, "container": container_name}
+
+    stdout = proc.stdout or ""
+    body, _, code_text = stdout.rpartition("\n")
+    try:
+        status_code = int(code_text.strip())
+    except ValueError:
+        status_code = 0
+        body = stdout
+    result = {
+        "action": action,
+        "container": container_name,
+        "status_code": status_code,
+        "returncode": proc.returncode,
+    }
+    if body.strip():
+        result["body"] = body.strip()[:1200]
+    if proc.stderr.strip():
+        result["stderr"] = proc.stderr.strip()[:1200]
+    if proc.returncode != 0 or status_code >= 400:
+        result["error"] = f"docker {action} failed"
+        result["error_type"] = "DockerApiError"
+    return result
+
+
+def _control_model_container(container_name: str, action: str, step: str, *, reason: str, **fields: Any) -> Dict[str, Any]:
+    if os.environ.get("MODEL_SERVICE_CONTROL", "docker").strip().lower() != "docker":
+        return {"skipped": True, "reason": "MODEL_SERVICE_CONTROL_disabled"}
+    started = _step_start(f"{step}_{action}", reason=reason, container=container_name, **fields)
+    result = _docker_container_request(container_name, action)
+    if "error" in result:
+        _log("error", "step.failed", step=f"{step}_{action}", reason=reason, duration_s=round(time.time() - started, 3), **result, **fields)
+    else:
+        _step_done(f"{step}_{action}", started, result=result, reason=reason, container=container_name, **fields)
+    return result
+
+
+def _control_audio_container(action: str, *, reason: str, **fields: Any) -> Dict[str, Any]:
+    return _control_model_container(
+        os.environ.get("AUDIO_CONTAINER_NAME", "pipeline-audio"),
+        action,
+        "audio_container",
+        reason=reason,
+        **fields,
+    )
+
+
+def _control_comfy_container(action: str, *, reason: str, **fields: Any) -> Dict[str, Any]:
+    return _control_model_container(
+        os.environ.get("COMFY_CONTAINER_NAME", "pipeline-comfyui"),
+        action,
+        "comfy_container",
+        reason=reason,
+        **fields,
+    )
+
+
+def _release_audio_models(audio_url: str, *, reason: str, **fields: Any) -> Dict[str, Any]:
+    stop_result = _control_audio_container("stop", reason=reason, **fields)
+    if not stop_result.get("skipped") and "error" not in stop_result:
+        return stop_result
+
+    started = _step_start("audio_unload", reason=reason, **fields)
+    result = _audio_unload(audio_url)
+    if "error" in result:
+        _log("error", "step.failed", step="audio_unload", reason=reason, duration_s=round(time.time() - started, 3), **result, **fields)
+    else:
+        _step_done("audio_unload", started, result=result, reason=reason, **fields)
+    return result
+
+
+def _ensure_audio_service(audio_url: str, *, reason: str, **fields: Any) -> Dict[str, Any]:
+    start_result = _control_audio_container("start", reason=reason, **fields)
+    started = _step_start("audio_health_wait", reason=reason, **fields)
+    try:
+        _wait_http_ok(f"{audio_url}/health", timeout_s=120, label="audio")
+        result = {"ready": True, "container_start": start_result}
+        _step_done("audio_health_wait", started, result=result, reason=reason, **fields)
+        return result
+    except Exception as exc:
+        _step_failed("audio_health_wait", started, exc, reason=reason, **fields)
+        raise
+
+
+def _release_comfy_models(comfy: ComfyClient, *, reason: str, **fields: Any) -> Dict[str, Any]:
+    stop_result = _control_comfy_container("stop", reason=reason, **fields)
+    if not stop_result.get("skipped") and "error" not in stop_result:
+        return stop_result
+
+    started = _step_start("comfy_free_memory", reason=reason, **fields)
+    result = comfy.free_memory(unload_models=True, free_memory=True)
+    if "error" in result:
+        _log("error", "step.failed", step="comfy_free_memory", reason=reason, duration_s=round(time.time() - started, 3), **result, **fields)
+    else:
+        _step_done("comfy_free_memory", started, result=result, reason=reason, **fields)
+    return result
+
+
+def _ensure_comfy_service(comfy: ComfyClient, *, reason: str, **fields: Any) -> Dict[str, Any]:
+    start_result = _control_comfy_container("start", reason=reason, **fields)
+    started = _step_start("comfy_health_wait", reason=reason, **fields)
+    try:
+        _wait_http_ok(f"{comfy.base_url}/system_stats", timeout_s=180, label="comfy")
+        result = {"ready": True, "container_start": start_result}
+        _step_done("comfy_health_wait", started, result=result, reason=reason, **fields)
+        return result
+    except Exception as exc:
+        _step_failed("comfy_health_wait", started, exc, reason=reason, **fields)
+        raise
 
 
 def _wait_http_ok(url: str, timeout_s: int, label: str) -> None:
@@ -573,27 +763,54 @@ def process_one_image(
     try:
         _log("info", "image.start", job_id=job_id, input_key=input_key)
 
-        t_download = time.time()
-        io.copy_input(input_key, local_input)
-        debug["timings"]["download_s"] = round(time.time() - t_download, 3)
+        t_download = _step_start("copy_input", job_id=job_id, input_key=input_key, source=input_key, destination=str(local_input))
+        try:
+            io.copy_input(input_key, local_input)
+            debug["timings"]["download_s"] = round(time.time() - t_download, 3)
+            _step_done("copy_input", t_download, result={"path": str(local_input)}, job_id=job_id, input_key=input_key)
+        except Exception as exc:
+            _step_failed("copy_input", t_download, exc, job_id=job_id, input_key=input_key)
+            raise
         _log("info", "image.download.done", job_id=job_id, input_key=input_key, duration_s=debug["timings"]["download_s"])
 
-        t_decision_start = time.time()
-        decision_result = decide_for_image_detailed(local_input, metadata={"job_id": job_id, "input_key": input_key})
+        t_decision_start = _step_start("decision", job_id=job_id, input_key=input_key, image_path=str(local_input))
+        try:
+            decision_result = decide_for_image_detailed(local_input, metadata={"job_id": job_id, "input_key": input_key})
+            _step_done(
+                "decision",
+                t_decision_start,
+                result={
+                    "preset": ((decision_result.get("decision") or {}).get("video") or {}).get("preset"),
+                    "image2json_used": (decision_result.get("image2json") or {}).get("used"),
+                },
+                job_id=job_id,
+                input_key=input_key,
+            )
+        except Exception as exc:
+            _step_failed("decision", t_decision_start, exc, job_id=job_id, input_key=input_key)
+            raise
         decision = decision_result["decision"]
         openai_meta = decision_result.get("openai", {})
+        image2json_meta = decision_result.get("image2json", {})
         decision = _apply_video_overrides(decision, video_overrides)
         runtime_overrides = decision.get("runtime") if isinstance(decision.get("runtime"), dict) else {}
         decision = validate_and_clamp_decision(decision)
         if runtime_overrides:
             decision["runtime"] = runtime_overrides
         _propagate_target_aspect(decision)
-        crop_info = _prepare_instagram_input_image(local_input, input_root, decision.get("framing", {}))
+        t_crop = _step_start("prepare_crop", job_id=job_id, input_key=input_key, framing=decision.get("framing", {}))
+        try:
+            crop_info = _prepare_instagram_input_image(local_input, input_root, decision.get("framing", {}))
+            _step_done("prepare_crop", t_crop, result={"path": crop_info.get("path"), "output_size": crop_info.get("output_size")}, job_id=job_id, input_key=input_key)
+        except Exception as exc:
+            _step_failed("prepare_crop", t_crop, exc, job_id=job_id, input_key=input_key)
+            raise
         cropped_input = Path(crop_info["path"])
         render_input = cropped_input
         debug["decision"] = decision
         debug["framing"] = crop_info
         debug["openai"] = openai_meta
+        debug["image2json"] = image2json_meta
         debug["timings"]["decision_s"] = round(time.time() - t_decision_start, 3)
         _log(
             "info",
@@ -607,6 +824,12 @@ def process_one_image(
             openai_input_tokens=openai_meta.get("usage", {}).get("input_tokens", 0),
             openai_output_tokens=openai_meta.get("usage", {}).get("output_tokens", 0),
             openai_total_tokens=openai_meta.get("usage", {}).get("total_tokens", 0),
+            image2json_enabled=image2json_meta.get("enabled"),
+            image2json_used=image2json_meta.get("used"),
+            image2json_model=image2json_meta.get("vision_model") or image2json_meta.get("model"),
+            image2json_text_model=image2json_meta.get("text_model"),
+            image2json_error=image2json_meta.get("error"),
+            image2json_error_type=image2json_meta.get("error_type"),
             crop_anchor=crop_info.get("crop_anchor"),
             cropped_input=cropped_input.as_posix(),
         )
@@ -614,11 +837,13 @@ def process_one_image(
         render_variants = str((decision.get("runtime") or {}).get("render_variants", "all"))
         video_candidates: List[Dict[str, Any]] = _video_variants_for_decision(decision, render_variants)
         debug["render_variants"] = render_variants
-        debug["planned_variants"] = [{"variant": _variant_key_for_preset(str(cfg.get("preset", ""))), "preset": str(cfg.get("preset", ""))} for cfg in video_candidates]
+        debug["planned_variants"] = [_planned_variant_entry(cfg) for cfg in video_candidates]
         final_outputs: List[Dict[str, str]] = []
         workflow_used: Dict[str, Any] | None = None
 
-        for idx, video_cfg in enumerate(video_candidates):
+        idx = 0
+        while idx < len(video_candidates):
+            video_cfg = video_candidates[idx]
             attempt = {"index": idx, "video": video_cfg, "status": "started"}
             last_attempt = attempt
             t_render_start = time.time()
@@ -629,6 +854,8 @@ def process_one_image(
                 workflow: Dict[str, Any]
                 prompt_id: str
 
+                _release_audio_models(audio_url, reason="before_comfy_render", job_id=job_id, input_key=input_key, attempt_index=idx)
+                _ensure_comfy_service(comfy, reason="before_comfy_render", job_id=job_id, input_key=input_key, attempt_index=idx)
                 t_workflow_build = time.time()
                 attempt["still_redraw_skipped"] = True
                 attempt_render_input, render_input_mode = _render_input_for_video(
@@ -640,63 +867,121 @@ def process_one_image(
                 attempt["render_input"] = str(attempt_render_input)
                 attempt["render_input_mode"] = render_input_mode
 
-                workflow = _build_workflow(
-                    comfy,
-                    templates_root=templates_root,
-                    local_input=attempt_render_input,
-                    output_prefix=f"{job_id}-{image_name}-{idx}-{variant_key}",
-                    video_cfg=video_cfg,
+                t_workflow_step = _step_start(
+                    "build_workflow",
+                    job_id=job_id,
+                    input_key=input_key,
+                    attempt_index=idx,
+                    preset=video_cfg.get("preset"),
+                    render_input=str(attempt_render_input),
+                    render_input_mode=render_input_mode,
                 )
+                try:
+                    workflow = _build_workflow(
+                        comfy,
+                        templates_root=templates_root,
+                        local_input=attempt_render_input,
+                        output_prefix=f"{job_id}-{image_name}-{idx}-{variant_key}",
+                        video_cfg=video_cfg,
+                    )
+                    _step_done("build_workflow", t_workflow_step, result={"nodes": len(workflow)}, job_id=job_id, input_key=input_key, attempt_index=idx)
+                except Exception as exc:
+                    _step_failed("build_workflow", t_workflow_step, exc, job_id=job_id, input_key=input_key, attempt_index=idx)
+                    raise
                 attempt["workflow_build_s"] = round(time.time() - t_workflow_build, 3)
-                t_submit = time.time()
-                prompt_id = comfy.submit_workflow(workflow)
+                t_submit = _step_start("comfy_submit", job_id=job_id, input_key=input_key, attempt_index=idx, preset=video_cfg.get("preset"))
+                try:
+                    prompt_id = comfy.submit_workflow(workflow)
+                    _step_done("comfy_submit", t_submit, result={"prompt_id": prompt_id}, job_id=job_id, input_key=input_key, attempt_index=idx)
+                except Exception as exc:
+                    _step_failed("comfy_submit", t_submit, exc, job_id=job_id, input_key=input_key, attempt_index=idx)
+                    raise
+                attempt["prompt_id"] = prompt_id
                 attempt["submit_s"] = round(time.time() - t_submit, 3)
-                t_wait = time.time()
-                hist = comfy.wait_for_prompt(prompt_id)
+                t_wait = _step_start("comfy_wait", job_id=job_id, input_key=input_key, attempt_index=idx, prompt_id=prompt_id)
+                try:
+                    hist = comfy.wait_for_prompt(prompt_id)
+                    _step_done("comfy_wait", t_wait, result={"prompt_id": prompt_id, "status": (hist.get("status") or {}).get("status_str")}, job_id=job_id, input_key=input_key, attempt_index=idx)
+                except Exception as exc:
+                    _step_failed("comfy_wait", t_wait, exc, job_id=job_id, input_key=input_key, attempt_index=idx, prompt_id=prompt_id)
+                    raise
                 attempt["comfy_wait_s"] = round(time.time() - t_wait, 3)
                 expected_prefix = _video_expected_prefix(workflow)
-                video_path = find_latest_mp4(
-                    hist,
-                    output_root,
-                    expected_prefix=expected_prefix,
-                )
+                t_find_video = _step_start("find_comfy_output", job_id=job_id, input_key=input_key, attempt_index=idx, expected_prefix=expected_prefix)
+                try:
+                    video_path = find_latest_mp4(
+                        hist,
+                        output_root,
+                        expected_prefix=expected_prefix,
+                    )
+                    _step_done("find_comfy_output", t_find_video, result={"video_path": str(video_path)}, job_id=job_id, input_key=input_key, attempt_index=idx)
+                except Exception as exc:
+                    _step_failed("find_comfy_output", t_find_video, exc, job_id=job_id, input_key=input_key, attempt_index=idx)
+                    raise
+                _release_comfy_models(comfy, reason="before_audio_generation", job_id=job_id, input_key=input_key, attempt_index=idx)
+                _ensure_audio_service(audio_url, reason="before_audio_generation", job_id=job_id, input_key=input_key, attempt_index=idx)
 
                 audio_cfg = decision["audio"]
                 shared_output_root = Path(os.environ.get("OUTPUT_DIR", "/data/outputs"))
                 shared_audio_dir = shared_output_root / "audio" / job_id / image_name
-                t_audio = time.time()
+                t_audio = _step_start(
+                    "audio_generate",
+                    job_id=job_id,
+                    input_key=input_key,
+                    attempt_index=idx,
+                    duration_s=audio_cfg["duration_s"],
+                    output_dir=str(shared_audio_dir),
+                )
                 _log("info", "image.audio.start", job_id=job_id, input_key=input_key, attempt_index=idx, duration_s=audio_cfg["duration_s"], output_dir=str(shared_audio_dir))
-                audio_info = _audio_generate(audio_url=audio_url, prompt=audio_cfg["prompt"], duration_s=audio_cfg["duration_s"], output_dir=shared_audio_dir)
+                try:
+                    audio_info = _audio_generate(audio_url=audio_url, prompt=audio_cfg["prompt"], duration_s=audio_cfg["duration_s"], output_dir=shared_audio_dir)
+                    _step_done("audio_generate", t_audio, result=audio_info, job_id=job_id, input_key=input_key, attempt_index=idx)
+                except Exception as exc:
+                    _step_failed("audio_generate", t_audio, exc, job_id=job_id, input_key=input_key, attempt_index=idx)
+                    raise
                 attempt["audio_generate_s"] = round(time.time() - t_audio, 3)
                 attempt["audio_backend"] = audio_info.get("backend", "unknown")
                 audio_path = Path(audio_info["wav_path"])
                 _log("info", "image.audio.done", job_id=job_id, input_key=input_key, attempt_index=idx, backend=attempt["audio_backend"], wav_path=str(audio_path), duration_s=attempt["audio_generate_s"])
+                _release_audio_models(audio_url, reason="after_audio_generation", job_id=job_id, input_key=input_key, attempt_index=idx)
 
                 final_name = f"final_{run_timestamp}_{variant_key}.mp4"
                 final_mux = local_case_dir / final_name
-                t_mux = time.time()
+                t_mux = _step_start("mux_video_audio", job_id=job_id, input_key=input_key, attempt_index=idx, video_path=str(video_path), audio_path=str(audio_path), output_path=str(final_mux))
                 video_fit = _video_fit_for_attempt(video_cfg, decision, render_input_mode)
                 pan_start, pan_end = _pan_window_for_attempt(video_cfg, decision, render_input_mode)
                 output_aspect = _output_aspect_for_attempt(video_cfg, decision, render_input_mode)
-                mux_video_audio(
-                    video_path=video_path,
-                    audio_path=audio_path,
-                    output_path=final_mux,
-                    mix_db=audio_cfg["mix_db"],
-                    video_fit=video_fit,
-                    pan_start=pan_start,
-                    pan_end=pan_end,
-                    output_aspect=output_aspect,
-                )
-                final_still_name = f"final_{run_timestamp}_{variant_key}.jpg"
-                final_still = local_case_dir / final_still_name
-                export_video_frame_image(final_mux, final_still)
+                try:
+                    mux_info = mux_video_audio(
+                        video_path=video_path,
+                        audio_path=audio_path,
+                        output_path=final_mux,
+                        mix_db=audio_cfg["mix_db"],
+                        video_fit=video_fit,
+                        pan_start=pan_start,
+                        pan_end=pan_end,
+                        output_aspect=output_aspect,
+                    )
+                    final_still_name = f"final_{run_timestamp}_{variant_key}.jpg"
+                    final_still = local_case_dir / final_still_name
+                    export_video_frame_image(final_mux, final_still)
+                    _step_done(
+                        "mux_video_audio",
+                        t_mux,
+                        result={"final_video": str(final_mux), "final_still": str(final_still), **mux_info},
+                        job_id=job_id,
+                        input_key=input_key,
+                        attempt_index=idx,
+                    )
+                except Exception as exc:
+                    _step_failed("mux_video_audio", t_mux, exc, job_id=job_id, input_key=input_key, attempt_index=idx)
+                    raise
                 attempt["mux_s"] = round(time.time() - t_mux, 3)
                 attempt["video_fit"] = video_fit
                 attempt["pan_start"] = pan_start
                 attempt["pan_end"] = pan_end
                 attempt["output_aspect"] = output_aspect
-                attempt["prompt_id"] = prompt_id
+                attempt.update(mux_info)
                 attempt["video_path"] = str(video_path)
                 attempt["audio_path"] = str(audio_path)
                 attempt["final_still_path"] = str(final_still)
@@ -718,11 +1003,40 @@ def process_one_image(
                 attempt["status"] = "failed"
                 attempt["error"] = str(exc)
                 attempt["error_type"] = exc.__class__.__name__
+                attempt["comfy_diagnostics"] = comfy.diagnostics(str(attempt.get("prompt_id", "")) or None)
+                attempt["comfy_free_after_failure"] = _release_comfy_models(
+                    comfy,
+                    reason="after_render_attempt_failure",
+                    job_id=job_id,
+                    input_key=input_key,
+                    attempt_index=idx,
+                )
+                attempt["audio_unload_after_failure"] = _release_audio_models(
+                    audio_url,
+                    reason="after_render_attempt_failure",
+                    job_id=job_id,
+                    input_key=input_key,
+                    attempt_index=idx,
+                )
                 attempt["render_s"] = round(time.time() - t_render_start, 3)
                 debug["attempts"].append(attempt)
                 _log("error", "image.render.attempt.failed", job_id=job_id, input_key=input_key, attempt_index=idx, variant=variant_key, status="failed", duration_s=attempt["render_s"], preset=video_cfg.get("preset"), error=str(exc), error_type=exc.__class__.__name__)
                 if _is_oom_error(exc):
                     raise RuntimeError(f"Render aborted on OOM: preset={video_cfg.get('preset')} error={exc}") from exc
+                if render_variants == "selected_pair":
+                    recovery = _enqueue_next_decision_fallback(video_candidates, decision, idx + 1)
+                    if recovery is not None:
+                        debug["planned_variants"] = [_planned_variant_entry(cfg) for cfg in video_candidates]
+                        _log(
+                            "info",
+                            "image.render.fallback.enqueued",
+                            job_id=job_id,
+                            input_key=input_key,
+                            after_attempt_index=idx,
+                            variant=_variant_key_for_preset(str(recovery.get("preset", ""))),
+                            preset=recovery.get("preset"),
+                        )
+            idx += 1
 
         if not final_outputs:
             raise RuntimeError("All render variants failed")
@@ -815,13 +1129,15 @@ def main() -> int:
     _log("info", "video.overrides", job_id=args.job_id, overrides=video_overrides)
 
     io = LocalIO(input_dir=input_dir, output_dir=output_dir)
+    _control_comfy_container("start", reason="initial_comfy_health", job_id=args.job_id)
     comfy_url = _resolve_comfy_url(os.environ.get("COMFY_URL", "http://localhost:18188"))
     comfy = ComfyClient(comfy_url)
     audio_url = os.environ.get("AUDIO_URL", "http://localhost:8000")
     templates_root = _resolve_templates_root()
 
     _log("info", "service.endpoint.selected", service="comfy", url=comfy.base_url)
-    _wait_http_ok(f"{audio_url}/health", timeout_s=30, label="audio")
+    _ensure_audio_service(audio_url, reason="initial_audio_health", job_id=args.job_id)
+    _release_audio_models(audio_url, reason="after_initial_audio_health", job_id=args.job_id)
 
     if args.input_file:
         image_keys = io.list_images(args.input_file)
