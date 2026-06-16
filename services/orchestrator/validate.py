@@ -39,37 +39,80 @@ def _scene_tags_text(scene: Dict[str, Any]) -> str:
     return " ".join(str(t).strip().lower().replace("_", " ") for t in (scene.get("tags") or []))
 
 
+AUDIO_SOUND_WORDS = {
+    "bird",
+    "birds",
+    "chirp",
+    "chirping",
+    "insect",
+    "insects",
+    "buzz",
+    "buzzing",
+    "leaf",
+    "leaves",
+    "rustle",
+    "rustling",
+    "foliage",
+    "grass",
+    "water",
+    "ripples",
+    "waves",
+    "traffic",
+    "train",
+    "hum",
+    "tone",
+    "air",
+    "room",
+    "ambience",
+    "soundscape",
+    "gulls",
+}
+
+TEXTURE_WORDS = {
+    "soft",
+    "warm",
+    "airy",
+    "dreamy",
+    "gentle",
+    "cinematic",
+    "atmospheric",
+    "ambient",
+    "texture",
+    "textures",
+}
+
+
 def _audio_profile_for_preset(preset: str) -> Dict[str, str]:
     profiles = {
         "SVD_SUBTLE": {
-            "audio": "soft, airy, gentle cinematic ambience",
+            "audio": "soft environmental ambience, no music",
         },
         "SVD_STRONG": {
-            "audio": "atmospheric, warm, cinematic ambience",
+            "audio": "warm atmospheric ambience, no music",
         },
         "ANIMATEDIFF_GRASS_WIND": {
-            "audio": "airy natural ambience, soft wind texture, cinematic ambience",
+            "audio": "birds chirping, insects buzzing, leaves rustling, no music",
         },
         "ANIMATEDIFF_CITY_PULSE": {
-            "audio": "urban ambient texture, soft pulse, cinematic ambience",
+            "audio": "distant traffic, soft city hum, no music",
         },
         "HUNYUAN15_I2V_720P": {
-            "audio": "cinematic ambient texture, soft atmosphere, natural motion ambience",
+            "audio": "realistic environmental ambience, no music",
         },
         "HUNYUAN15_I2V_FAST": {
-            "audio": "soft cinematic ambience, gentle motion texture",
+            "audio": "soft realistic ambience, no music",
         },
     }
     return profiles.get(preset, profiles["SVD_SUBTLE"])
 
 
-def _merge_prompt_hints(*parts: Any) -> str:
+def _merge_prompt_hints(*parts: Any, limit: int = 300) -> str:
     merged: List[str] = []
     for part in parts:
         text = " ".join(str(part or "").split()).strip()
         if text:
             merged.append(text)
-    return ", ".join(merged)[:160]
+    return _limit_text(", ".join(merged), limit)
 
 
 def _limit_text(text: str, limit: int) -> str:
@@ -84,6 +127,9 @@ def _motion_control_params(params: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     if bool(params.get("use_original_input_for_video")):
         out["use_original_input_for_video"] = True
+    final_crop_motion = str(params.get("final_crop_motion", "")).strip().lower()
+    if final_crop_motion in {"static", "pan_left_to_right", "pan_right_to_left", "push_in", "pull_out"}:
+        out["final_crop_motion"] = final_crop_motion
     pan_direction = str(params.get("pan_direction", "")).strip().lower()
     if pan_direction in {"left_to_right", "right_to_left", "top_to_bottom", "bottom_to_top", "auto"}:
         out["pan_direction"] = pan_direction
@@ -112,30 +158,38 @@ def _motion_bucket_for_scene(scene: Dict[str, Any], preset: str, current_value: 
     return clamp_int(value, 10, 80)
 
 
-def _compose_audio_prompt(preset: str, scene: Dict[str, Any], current_prompt: str) -> str:
-    scene_text = _scene_terms(scene)
+def _compose_audio_prompt(preset: str, scene: Dict[str, Any], audio: Dict[str, Any], current_prompt: str) -> str:
     tags_text = _scene_tags_text(scene)
     profile = _audio_profile_for_preset(preset)
     prompt = " ".join(str(current_prompt or "").split()).strip()
+    trusted_soundscape = str(audio.get("prompt_source", "")).strip() == "image2json_soundscape"
     if not prompt:
         prompt = profile["audio"]
 
     scene_audio = ""
-    if any(term in tags_text for term in ["forest", "tree", "trees", "woods", "meadow", "field", "flower", "grass", "hill", "hills", "countryside", "rural"]):
-        scene_audio = "birds, insects, soft wind through grass"
+    if any(term in tags_text for term in ["forest", "tree", "trees", "woods", "meadow", "field", "flower", "grass", "hill", "hills", "countryside", "rural", "nature", "greenery", "mountain", "mountains"]):
+        scene_audio = "birds chirping, insects buzzing, leaves rustling"
     elif any(term in tags_text for term in ["city", "urban", "street", "skyline", "paris", "eiffel", "avenue", "rooftops"]):
-        scene_audio = "distant traffic, occasional train, city ambience"
+        scene_audio = "distant traffic, soft city hum"
     elif any(term in tags_text for term in ["ocean", "sea", "shore", "waves", "beach"]):
         scene_audio = "small waves, sea breeze, distant gulls"
     elif any(term in tags_text for term in ["lake", "river", "water", "reflection"]):
         scene_audio = "gentle water ripples, birds, light wind"
+    elif any(term in tags_text for term in ["interior", "room", "building", "architecture", "museum", "hall", "indoor"]):
+        scene_audio = "soft interior room tone, subtle air"
     elif any(term in tags_text for term in ["orchestra", "concert", "stage", "musicians", "trombone"]):
         scene_audio = "soft room tone, quiet audience, warm brass resonance"
 
-    if scene_audio and scene_audio not in prompt.lower():
+    prompt_lower = prompt.lower()
+    prompt_has_sound = any(word in prompt_lower for word in AUDIO_SOUND_WORDS)
+    prompt_is_texture_only = any(word in prompt_lower for word in TEXTURE_WORDS) and not prompt_has_sound
+
+    if trusted_soundscape:
+        pass
+    elif scene_audio and (prompt_is_texture_only or scene_audio not in prompt_lower):
         prompt = f"{scene_audio}, {prompt}"
-    if scene_text != "original scene" and scene_text not in prompt.lower():
-        prompt = f"{scene_text}, {prompt}"
+    if "no music" not in prompt.lower():
+        prompt = f"{prompt}, no music"
     return _limit_text(prompt, 96)
 
 
@@ -149,6 +203,27 @@ def clamp_int(value: Any, low: int, high: int) -> int:
     except (TypeError, ValueError):
         ivalue = low
     return int(clamp(ivalue, low, high))
+
+
+def _motion_strength_value(value: Any, default: int) -> int:
+    if isinstance(value, str):
+        named = {
+            "very_low": 20,
+            "very low": 20,
+            "low": 32,
+            "medium": 48,
+            "high": 62,
+        }
+        key = value.strip().lower().replace("-", "_")
+        if key in named:
+            return named[key]
+        key = key.replace("_", " ")
+        if key in named:
+            return named[key]
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _nearest_mult_64(width: int, high: int = 768) -> int:
@@ -205,7 +280,7 @@ def default_video_for_preset(preset: str) -> Dict[str, Any]:
             },
         },
         "SVD_STRONG": {
-            "fps": 8,
+            "fps": 7,
             "frames": 35,
             "resolution_width": 832,
             "params": {
@@ -215,7 +290,7 @@ def default_video_for_preset(preset: str) -> Dict[str, Any]:
             },
         },
         "SVD_SUBTLE": {
-            "fps": 8,
+            "fps": 7,
             "frames": 35,
             "resolution_width": 768,
             "params": {
@@ -225,8 +300,8 @@ def default_video_for_preset(preset: str) -> Dict[str, Any]:
             },
         },
         "ANIMATEDIFF_GRASS_WIND": {
-            "fps": 8,
-            "frames": 32,
+            "fps": 7,
+            "frames": 35,
             "resolution_width": 768,
             "params": {
                 "ckpt_name": "meinamix_v11.safetensors",
@@ -241,8 +316,8 @@ def default_video_for_preset(preset: str) -> Dict[str, Any]:
             },
         },
         "ANIMATEDIFF_CITY_PULSE": {
-            "fps": 8,
-            "frames": 32,
+            "fps": 7,
+            "frames": 35,
             "resolution_width": 768,
             "params": {
                 "ckpt_name": "counterfeit_v30.safetensors",
@@ -292,10 +367,23 @@ def _validate_video(video: Dict[str, Any]) -> Dict[str, Any]:
     fps_max = int(preset_defaults["fps"]) if is_hunyuan else 10
     frame_max = int(preset_defaults["frames"]) if is_hunyuan else 35
     resolution_max = int(preset_defaults["resolution_width"]) if is_hunyuan else 832
-    v["fps"] = clamp_int(video.get("fps", params.get("fps", v.get("fps", 6))), 3, fps_max)
+    requested_fps = video.get("fps", params.get("fps", v.get("fps", 6)))
+    try:
+        requested_fps_int = int(requested_fps)
+    except (TypeError, ValueError):
+        requested_fps_int = int(preset_defaults["fps"])
+    if not is_hunyuan and requested_fps_int > fps_max:
+        requested_fps_int = int(preset_defaults["fps"])
+    v["fps"] = clamp_int(requested_fps_int, 3, fps_max)
     requested_frames = video.get("frames", params.get("frames", v.get("frames", 20)))
+    try:
+        requested_frames_int = int(requested_frames)
+    except (TypeError, ValueError):
+        requested_frames_int = int(preset_defaults["frames"])
+    if not is_hunyuan and requested_frames_int > frame_max:
+        requested_frames_int = int(preset_defaults["frames"])
     min_frames_for_duration = v["duration_s"] * v["fps"]
-    v["frames"] = clamp_int(max(int(requested_frames), min_frames_for_duration), 10, frame_max)
+    v["frames"] = clamp_int(max(requested_frames_int, min_frames_for_duration), 10, frame_max)
     v["resolution_width"] = _nearest_mult_64(
         clamp_int(video.get("resolution_width", params.get("resolution_width", v.get("resolution_width", 576))), 384, resolution_max),
         high=resolution_max,
@@ -332,7 +420,7 @@ def _validate_video(video: Dict[str, Any]) -> Dict[str, Any]:
             **_motion_control_params(params),
         }
     elif preset.startswith("SVD"):
-        motion_strength = clamp_int(params.get("motion_strength", 35), 10, 80)
+        motion_strength = clamp_int(_motion_strength_value(params.get("motion_strength"), 35), 10, 80)
         mapped_motion = clamp_int(int(round(motion_strength * 0.75)), 10, 80)
         v["params"] = {
             "motion_bucket_id": clamp_int(params.get("motion_bucket_id", mapped_motion), 10, 80),
@@ -355,7 +443,7 @@ def _validate_video(video: Dict[str, Any]) -> Dict[str, Any]:
             "prompt": prompt_hint or str(params.get("prompt", "cinematic anime scene with subtle motion, preserve original composition"))[:300],
             "negative_prompt": str(params.get("negative_prompt", "low quality, blurry, distorted, deformed, bad anatomy, text, watermark, flicker"))[:240],
             "cfg": float(clamp(float(params.get("cfg", 4.0)), 1.0, 7.0)),
-            "motion_strength": clamp_int(params.get("motion_strength", 40), 20, 70),
+            "motion_strength": clamp_int(_motion_strength_value(params.get("motion_strength"), 40), 20, 70),
             "context_length": clamp_int(params.get("context_length", 16), 8, 24),
             "context_overlap": clamp_int(params.get("context_overlap", 4), 0, 8),
             "duration_s": v["duration_s"],
@@ -400,6 +488,16 @@ def validate_and_clamp_decision(raw: Dict[str, Any]) -> Dict[str, Any]:
         # Keep audio clearly audible in final mux by default.
         "mix_db": float(clamp(float(audio.get("mix_db", -2.0)), -3.0, 6.0)),
     }
+    for key in (
+        "prompt_source",
+        "soundscape_confidence",
+        "soundscape_environment_type",
+        "soundscape_proximity",
+        "soundscape_reasoning",
+        "avoid_sounds",
+    ):
+        if key in audio:
+            audio_out[key] = copy.deepcopy(audio[key])
 
     fallbacks_raw = raw.get("fallbacks") or []
     if not isinstance(fallbacks_raw, list):
@@ -425,30 +523,30 @@ def validate_and_clamp_decision(raw: Dict[str, Any]) -> Dict[str, Any]:
         scene_text = _scene_terms(scene_out)
         current_prompt = str(video["params"].get("prompt", "")).strip()
         if scene_text != "original scene" and scene_text not in current_prompt.lower():
-            video["params"]["prompt"] = f"{scene_text}, {current_prompt}"[:300]
+            video["params"]["prompt"] = _limit_text(f"{current_prompt}, {scene_text}".strip(" ,"), 300)
     elif str(video["preset"]).startswith("ANIMATEDIFF_"):
         scene_text = _scene_terms(scene_out)
         current_prompt = str(video["params"].get("prompt", "")).strip()
         if scene_text != "original scene" and scene_text not in current_prompt.lower():
-            video["params"]["prompt"] = f"{scene_text}, {current_prompt}"[:300]
+            video["params"]["prompt"] = _limit_text(f"{current_prompt}, {scene_text}".strip(" ,"), 300)
     if "motion_bucket_id" in video["params"]:
         video["params"]["motion_bucket_id"] = _motion_bucket_for_scene(
             scene_out,
             video["preset"],
             int(video["params"].get("motion_bucket_id", 18)),
         )
-    audio_out["prompt"] = _compose_audio_prompt(video["preset"], scene_out, audio_out["prompt"])
+    audio_out["prompt"] = _compose_audio_prompt(video["preset"], scene_out, audio_out, audio_out["prompt"])
     for fb in fallbacks:
         if str(fb["preset"]).startswith("HUNYUAN15_"):
             scene_text = _scene_terms(scene_out)
             current_prompt = str(fb["params"].get("prompt", "")).strip()
             if scene_text != "original scene" and scene_text not in current_prompt.lower():
-                fb["params"]["prompt"] = f"{scene_text}, {current_prompt}"[:300]
+                fb["params"]["prompt"] = _limit_text(f"{current_prompt}, {scene_text}".strip(" ,"), 300)
         elif str(fb["preset"]).startswith("ANIMATEDIFF_"):
             scene_text = _scene_terms(scene_out)
             current_prompt = str(fb["params"].get("prompt", "")).strip()
             if scene_text != "original scene" and scene_text not in current_prompt.lower():
-                fb["params"]["prompt"] = f"{scene_text}, {current_prompt}"[:300]
+                fb["params"]["prompt"] = _limit_text(f"{current_prompt}, {scene_text}".strip(" ,"), 300)
         if "motion_bucket_id" in fb["params"]:
             fb["params"]["motion_bucket_id"] = _motion_bucket_for_scene(
                 scene_out,

@@ -40,6 +40,7 @@ def _normalized_video_filter(
     output_aspect: str = "instagram_reel_9_16",
     output_fps: int = 30,
     interpolation: str = "off",
+    target_duration_s: float = 5.0,
 ) -> str:
     if output_aspect == "square_1_1":
         out_w = 1080
@@ -48,8 +49,10 @@ def _normalized_video_filter(
         out_w = 1080
         out_h = 1920
 
-    smoothness = _smoothness_filter(output_fps, interpolation)
-    suffix = f",{smoothness},setsar=1,format=yuv420p" if smoothness else ",setsar=1,format=yuv420p"
+    target_duration_s = _clamp_float(float(target_duration_s), 1.0, 30.0)
+    smoothness = _smoothness_filter(output_fps, interpolation) or f"fps={output_fps}"
+    duration_filter = f",tpad=stop_mode=clone:stop_duration={target_duration_s:.3f},trim=duration={target_duration_s:.3f},setpts=PTS-STARTPTS"
+    suffix = f"{duration_filter},{smoothness},setsar=1,format=yuv420p"
 
     if video_fit == "cover":
         return (
@@ -60,16 +63,15 @@ def _normalized_video_filter(
     if video_fit in {"pan_left_to_right", "pan_right_to_left"}:
         # Scale wide video to target height, then animate the final crop across it.
         # This is for panoramic originals where a static portrait crop loses key content.
-        duration_s = 4.8
         pan_start = _clamp_float(float(pan_start), 0.0, 1.0)
         pan_end = _clamp_float(float(pan_end), 0.0, 1.0)
         if video_fit == "pan_right_to_left" and pan_start < pan_end:
             pan_start, pan_end = pan_end, pan_start
         if video_fit == "pan_left_to_right" and pan_end < pan_start:
             pan_start, pan_end = pan_end, pan_start
-        x_expr = f"(iw-ow)*({pan_start:.4f}+(({pan_end:.4f}-{pan_start:.4f})*min(t\\,{duration_s})/{duration_s}))"
+        x_expr = f"(iw-ow)*({pan_start:.4f}+(({pan_end:.4f}-{pan_start:.4f})*min(t\\,{target_duration_s:.3f})/{target_duration_s:.3f}))"
         if video_fit == "pan_right_to_left":
-            x_expr = f"(iw-ow)*({pan_start:.4f}+(({pan_end:.4f}-{pan_start:.4f})*min(t\\,{duration_s})/{duration_s}))"
+            x_expr = f"(iw-ow)*({pan_start:.4f}+(({pan_end:.4f}-{pan_start:.4f})*min(t\\,{target_duration_s:.3f})/{target_duration_s:.3f}))"
         return (
             f"scale=-2:{out_h},"
             f"crop={out_w}:{out_h}:x='{x_expr}':y=0"
@@ -92,6 +94,7 @@ def mux_video_audio(
     pan_start: float = 0.0,
     pan_end: float = 1.0,
     output_aspect: str = "instagram_reel_9_16",
+    target_duration_s: float = 5.0,
 ) -> dict:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_fps = _final_video_fps()
@@ -109,10 +112,12 @@ def mux_video_audio(
     except ValueError:
         mux_true_peak_db = -1.0
     effective_mix_db = max(-24.0, min(12.0, float(mix_db) + gain_boost_db))
+    target_duration_s = _clamp_float(float(target_duration_s), 1.0, 30.0)
     filter_complex = (
-        f"[0:v]{_normalized_video_filter(video_fit, pan_start=pan_start, pan_end=pan_end, output_aspect=output_aspect, output_fps=output_fps, interpolation=interpolation)}[v0];"
+        f"[0:v]{_normalized_video_filter(video_fit, pan_start=pan_start, pan_end=pan_end, output_aspect=output_aspect, output_fps=output_fps, interpolation=interpolation, target_duration_s=target_duration_s)}[v0];"
         f"[1:a]loudnorm=I={mux_target_lufs}:TP={mux_true_peak_db}:LRA=11,"
-        f"volume={effective_mix_db}dB[a1]"
+        f"volume={effective_mix_db}dB,"
+        f"apad=pad_dur={target_duration_s:.3f},atrim=duration={target_duration_s:.3f},asetpts=PTS-STARTPTS[a1]"
     )
 
     cmd_reencode = [
@@ -162,6 +167,7 @@ def mux_video_audio(
     return {
         "final_video_fps": output_fps,
         "final_video_interpolation": interpolation,
+        "target_duration_s": target_duration_s,
     }
 
 

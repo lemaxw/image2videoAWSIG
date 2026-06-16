@@ -118,7 +118,8 @@ def _prepare_selected_video_variant(video_cfg: Dict[str, Any], decision: Dict[st
     params = video_cfg.get("params") if isinstance(video_cfg.get("params"), dict) else {}
     if _uses_original_pan(video_cfg, decision):
         params.pop("target_aspect", None)
-        params.setdefault("pan_direction", "left_to_right")
+        if "final_crop_motion" not in params and "pan_direction" not in params:
+            params["final_crop_motion"] = "pan_left_to_right" if _scene_suggests_original_pan(scene, video_cfg) else "static"
         if _scene_prefers_square_pan(scene, video_cfg):
             params.setdefault("output_aspect", "square_1_1")
         params["use_original_input_for_video"] = True
@@ -209,10 +210,22 @@ def _video_fit_for_attempt(video_cfg: Dict[str, Any], decision: Dict[str, Any], 
     if render_input_mode != "original":
         return "contain"
     params = video_cfg.get("params") if isinstance(video_cfg.get("params"), dict) else {}
-    direction = str(params.get("pan_direction", "left_to_right")).strip().lower()
+    final_crop_motion = str(params.get("final_crop_motion", "")).strip().lower()
+    if final_crop_motion == "static":
+        return "cover"
+    if final_crop_motion in {"push_in", "pull_out"}:
+        return "cover"
+    if final_crop_motion == "pan_right_to_left":
+        return "pan_right_to_left"
+    if final_crop_motion == "pan_left_to_right":
+        return "pan_left_to_right"
+    direction = str(params.get("pan_direction", "")).strip().lower()
     if direction == "right_to_left":
         return "pan_right_to_left"
-    return "pan_left_to_right"
+    if direction == "left_to_right":
+        return "pan_left_to_right"
+    scene = decision.get("scene") if isinstance(decision.get("scene"), dict) else {}
+    return "pan_left_to_right" if _scene_suggests_original_pan(scene, video_cfg) else "cover"
 
 
 def _output_aspect_for_attempt(video_cfg: Dict[str, Any], decision: Dict[str, Any], render_input_mode: str) -> str:
@@ -961,6 +974,7 @@ def process_one_image(
                         pan_start=pan_start,
                         pan_end=pan_end,
                         output_aspect=output_aspect,
+                        target_duration_s=audio_cfg["duration_s"],
                     )
                     final_still_name = f"final_{run_timestamp}_{variant_key}.jpg"
                     final_still = local_case_dir / final_still_name

@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -22,15 +23,26 @@ logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.INFO)
 
 _PIPE = None
+_BACKEND_LOCK = threading.RLock()
 FORBIDDEN_PROMPT_WORDS = {"loud", "chaotic", "intense", "fast", "music", "song", "melody"}
 TEXTURE_HINTS = ("soft", "warm", "airy", "dreamy", "gentle", "cinematic", "atmospheric", "ambient")
 SOUND_WORDS = (
     "bird",
     "birds",
+    "chirp",
+    "chirping",
     "insect",
     "insects",
+    "buzz",
+    "buzzing",
     "bug",
     "bugs",
+    "leaf",
+    "leaves",
+    "rustle",
+    "rustling",
+    "foliage",
+    "grass",
     "wind",
     "traffic",
     "train",
@@ -42,6 +54,9 @@ SOUND_WORDS = (
     "ripples",
     "hum",
     "tone",
+    "air",
+    "ambience",
+    "room",
     "audience",
     "brass",
     "gulls",
@@ -49,7 +64,8 @@ SOUND_WORDS = (
 )
 
 SCENE_SOUND_HINTS = (
-    (("forest", "trees", "woods", "meadow", "field", "flower", "grass", "hills", "countryside"), "birds, insects, soft wind through grass"),
+    (("forest", "trees", "woods", "meadow", "field", "flower", "grass", "hills", "countryside", "rural", "nature", "greenery", "mountain", "mountains"), "birds chirping, insects buzzing, leaves rustling"),
+    (("interior", "room", "building", "architecture", "museum", "hall", "indoor"), "soft interior room tone, subtle air"),
     (("city", "urban", "street", "skyline", "paris", "eiffel", "avenue", "rooftops"), "distant traffic, occasional train, city ambience"),
     (("night", "neon", "bridge", "lights"), "soft city hum, distant traffic, gentle air"),
     (("ocean", "sea", "shore", "waves", "beach"), "small waves, sea breeze, distant gulls"),
@@ -74,42 +90,44 @@ def _load_backend():
     backend = os.environ.get("AUDIO_MODEL_BACKEND", "mock").lower()
     if backend not in {"audioldm", "tangoflux"}:
         return None
-    if _PIPE is not None:
+    with _BACKEND_LOCK:
+        if _PIPE is not None:
+            return _PIPE
+
+        device_name = os.environ.get("AUDIO_DEVICE", "cpu")
+        dtype = torch.float16 if device_name == "cuda" else torch.float32
+        cache_dir = os.environ.get("AUDIO_CACHE_DIR", "/cache")
+        logger.info("audio.backend.init backend=%s device=%s dtype=%s cache_dir=%s", backend, device_name, str(dtype), cache_dir)
+        if backend == "tangoflux":
+            os.environ.setdefault("HF_HOME", cache_dir)
+            os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+            from tangoflux import TangoFluxInference
+
+            started = time.time()
+            _PIPE = TangoFluxInference(name=os.environ.get("TANGOFLUX_MODEL", "declare-lab/TangoFlux"), device=device_name)
+            logger.info("audio.backend.ready backend=tangoflux duration_s=%.3f", time.time() - started)
+        else:
+            from diffusers import AudioLDMPipeline
+
+            started = time.time()
+            _PIPE = AudioLDMPipeline.from_pretrained(
+                "cvssp/audioldm-s-full-v2",
+                torch_dtype=dtype,
+                cache_dir=cache_dir,
+            )
+            _PIPE = _PIPE.to(device_name)
+            logger.info("audio.backend.ready backend=audioldm duration_s=%.3f", time.time() - started)
         return _PIPE
-
-    device_name = os.environ.get("AUDIO_DEVICE", "cpu")
-    dtype = torch.float16 if device_name == "cuda" else torch.float32
-    cache_dir = os.environ.get("AUDIO_CACHE_DIR", "/cache")
-    logger.info("audio.backend.init backend=%s device=%s dtype=%s cache_dir=%s", backend, device_name, str(dtype), cache_dir)
-    if backend == "tangoflux":
-        os.environ.setdefault("HF_HOME", cache_dir)
-        os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
-        from tangoflux import TangoFluxInference
-
-        started = time.time()
-        _PIPE = TangoFluxInference(name=os.environ.get("TANGOFLUX_MODEL", "declare-lab/TangoFlux"), device=device_name)
-        logger.info("audio.backend.ready backend=tangoflux duration_s=%.3f", time.time() - started)
-    else:
-        from diffusers import AudioLDMPipeline
-
-        started = time.time()
-        _PIPE = AudioLDMPipeline.from_pretrained(
-            "cvssp/audioldm-s-full-v2",
-            torch_dtype=dtype,
-            cache_dir=cache_dir,
-        )
-        _PIPE = _PIPE.to(device_name)
-        logger.info("audio.backend.ready backend=audioldm duration_s=%.3f", time.time() - started)
-    return _PIPE
 
 
 def _unload_backend() -> dict:
     global _PIPE
-    had_pipe = _PIPE is not None
     started = time.time()
-    if _PIPE is not None:
-        del _PIPE
-        _PIPE = None
+    with _BACKEND_LOCK:
+        had_pipe = _PIPE is not None
+        if _PIPE is not None:
+            del _PIPE
+            _PIPE = None
     gc.collect()
     cuda_available = torch.cuda.is_available()
     if cuda_available:
@@ -175,11 +193,11 @@ def _normalize_prompt(raw_prompt: str) -> str:
             inferred_hints.append(hint)
             break
 
-    scene_parts = cleaned_parts[:2]
-    sound_parts = [part for part in cleaned_parts[2:] if any(word in part.lower() for word in SOUND_WORDS)]
+    sound_parts = [part for part in cleaned_parts if any(word in part.lower() for word in SOUND_WORDS)]
+    scene_parts = [part for part in cleaned_parts if part not in sound_parts][:2]
 
     useful_parts: List[str] = []
-    for part in scene_parts + inferred_hints + sound_parts:
+    for part in sound_parts + inferred_hints + scene_parts:
         if part.lower() not in [p.lower() for p in useful_parts]:
             useful_parts.append(part)
 
@@ -187,7 +205,8 @@ def _normalize_prompt(raw_prompt: str) -> str:
     tail = "soft atmospheric ambience, realistic environmental soundscape"
     if has_texture:
         tail = "realistic environmental soundscape, no music"
-    useful_parts.append(tail)
+    if all("no music" not in part.lower() for part in useful_parts):
+        useful_parts.append(tail)
     return ", ".join(useful_parts[:6])[:260]
 
 
@@ -429,12 +448,13 @@ def generate(req: GenerateRequest):
     )
     if backend in {"audioldm", "tangoflux"}:
         try:
-            if backend == "tangoflux":
-                _generate_tangoflux_processed(req.prompt, duration_s, wav_path)
-                backend_name = "tangoflux-processed"
-            else:
-                _generate_audioldm_processed(req.prompt, duration_s, wav_path)
-                backend_name = "audioldm-processed"
+            with _BACKEND_LOCK:
+                if backend == "tangoflux":
+                    _generate_tangoflux_processed(req.prompt, duration_s, wav_path)
+                    backend_name = "tangoflux-processed"
+                else:
+                    _generate_audioldm_processed(req.prompt, duration_s, wav_path)
+                    backend_name = "audioldm-processed"
             logger.info("audio.generate.done backend=%s output=%s", backend_name, str(wav_path))
             return GenerateResponse(wav_path=str(wav_path), backend=backend_name)
         except Exception as exc:
