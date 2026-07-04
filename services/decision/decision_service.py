@@ -190,10 +190,20 @@ def _dynamic_is_pano_motion_candidate(dynamic: Dict[str, Any]) -> bool:
     return has_pan and has_nature_motion
 
 
+def _pan_defaults_for_anchor(decision: Dict[str, Any]) -> tuple[float, float]:
+    anchor = str((decision.get("framing") or {}).get("crop_anchor", "center_center")).strip().lower()
+    if anchor.startswith("left_"):
+        return 0.0, 0.14
+    if anchor.startswith("right_"):
+        return 1.0, 0.86
+    return 0.36, 0.50
+
+
 def _backend_motion_prompt(preset: str, dynamic: Dict[str, Any]) -> str:
     terms = _dynamic_motion_terms(dynamic)
     has_clouds = _has_dynamic_term(terms, "cloud", "sky")
     has_water = _has_dynamic_term(terms, "water", "lake", "river", "ocean", "sea")
+    has_waves = _has_dynamic_term(terms, "wave", "waves", "shore", "surf", "foam")
     has_foliage = _has_dynamic_term(terms, "foliage", "grass", "flower", "leaf", "vegetation")
     has_light = _has_dynamic_term(terms, "reflection", "light", "atmospher", "fog", "haze")
 
@@ -203,8 +213,10 @@ def _backend_motion_prompt(preset: str, dynamic: Dict[str, Any]) -> str:
             parts.append("slow smooth lateral crop pan")
         if has_clouds:
             parts.append("gentle cloud drift")
-        if has_water:
-            parts.append("light water texture")
+        if has_waves or _has_dynamic_term(terms, "ocean", "sea"):
+            parts.append("visible ocean wave motion and foam")
+        elif has_water:
+            parts.append("visible water ripples")
         if has_foliage:
             parts.append("soft foliage movement")
         parts.append("avoid warping mountains or shoreline")
@@ -215,8 +227,10 @@ def _backend_motion_prompt(preset: str, dynamic: Dict[str, Any]) -> str:
         parts = ["cinematic anime landscape atmosphere", "stable mountains and shoreline"]
         if has_clouds:
             parts.append("minimal slow cloud drift")
-        if has_water:
-            parts.append("subtle lake surface shimmer")
+        if has_waves or _has_dynamic_term(terms, "ocean", "sea"):
+            parts.append("visible ocean waves and foam moving along the shore")
+        elif has_water:
+            parts.append("visible water ripples traveling horizontally")
         if has_foliage and not pano_candidate:
             parts.append("gentle foreground foliage movement")
         if has_light:
@@ -291,18 +305,23 @@ def _apply_image2json_motion_guidance(decision: Dict[str, Any], analysis: Any) -
         params["negative_prompt"] = negative_prompt[:240]
 
         if preset.startswith("HUNYUAN15_") and _dynamic_is_pano_motion_candidate(dynamic):
+            pan_start, pan_end = _pan_defaults_for_anchor(decision)
             params["use_original_input_for_video"] = True
             params.setdefault("output_aspect", "square_1_1")
             params["camera_motion"] = "slow lateral crop pan"
             params["final_crop_motion"] = "pan_left_to_right"
-            params.setdefault("pan_start", 0.36)
-            params.setdefault("pan_end", 0.50)
+            params.setdefault("pan_start", pan_start)
+            params.setdefault("pan_end", pan_end)
             params.setdefault("pan_max_span", 0.16)
             params.setdefault("motion_strength", "low")
         elif preset.startswith("ANIMATEDIFF_"):
+            terms = _dynamic_motion_terms(dynamic)
             params["camera_motion"] = "locked camera with minimal environmental motion"
             params["final_crop_motion"] = "static"
-            params["motion_strength"] = "very_low" if _dynamic_is_pano_motion_candidate(dynamic) else params.get("motion_strength", "low")
+            if _dynamic_is_pano_motion_candidate(dynamic) and not _has_dynamic_term(terms, "water", "ocean", "sea", "wave", "waves", "foam", "shore"):
+                params["motion_strength"] = "very_low"
+            else:
+                params["motion_strength"] = params.get("motion_strength", "low")
         elif not params.get("camera_motion"):
             params["camera_motion"] = "locked camera with atmospheric motion"
 
@@ -917,12 +936,19 @@ If a vertical crop is unsafe, keep framing.target_aspect unchanged and set video
 
 crop_anchor:
 Use spatial_map.primary_regions when available.
+Use composition.visual_balance, composition.attention_regions, and edge_content as framing evidence too.
+The anchor must describe the best 9:16 crop position, not only the numeric center of the largest box.
 
 Choose the most important region:
 
 * Prefer regions with importance "primary".
 * If multiple primary regions exist, prefer the one that best represents the image story.
-* If important regions are spread across the full image, use center_center.
+* If composition.visual_balance is left-heavy, choose a left_* anchor unless people or critical details would be cut.
+* If composition.visual_balance is right-heavy, choose a right_* anchor unless people or critical details would be cut.
+* If composition.visual_balance is top-heavy or bottom-heavy, choose the matching vertical band unless people or critical details would be cut.
+* Visual balance overrides the center-grid result when the primary region is broad, near center, or spans much of the image.
+* If attention_regions identify a clear dominant subject, bias the anchor toward that subject even when its bounding box center falls in the center grid band.
+* If important regions are truly spread across the full image and visual_balance is balanced or symmetrical, use center_center.
 * If people are present and important, prefer the anchor that keeps people visible.
 * If uncertain, use center_center.
 
@@ -941,15 +967,26 @@ left_top, center_top, right_top,
 left_center, center_center, right_center,
 left_bottom, center_bottom, right_bottom.
 
+After mapping, apply visual_balance as a correction:
+* left-heavy + center_* -> left_*.
+* right-heavy + center_* -> right_*.
+* top-heavy + *_center -> *_top.
+* bottom-heavy + *_center -> *_bottom.
+* Do not return center_center for left-heavy or right-heavy compositions unless the input explicitly says balanced/symmetrical or the side crop would cut important people/details.
+Example: a dominant shipwreck with primary region center x=0.48, y=0.37 but composition.visual_balance="left-heavy" should use left_center, not center_center.
+
 Wide composition:
 If reframe_constraints.wide_composition is true, or full_width_important_content is true, or vertical_crop_risk is "high":
 
-* Prefer crop_anchor center_center unless a clear subject region is dominant.
+* Prefer crop_anchor center_center only when the composition is balanced/symmetrical or important content is evenly distributed.
+* If composition.visual_balance is left-heavy or right-heavy, choose a crop_anchor on the heavier side unless that would cut the primary subject.
 * Set video.params.use_original_input_for_video = true.
 * Set video.params.output_aspect = "square_1_1" if vertical crop would lose the main story.
 * Prefer "square_1_1" over "original" for panoramas, broad landscapes, or wide scenes where a 9:16 crop would be too narrow or would add padding/margins.
 * Use "original" only when the input explicitly requires a full original-aspect export and no square or vertical crop can preserve the story.
 * If dynamic_potential.camera_motion_affordances includes panning for a panorama, broad landscape, water view, mountain view, or separated subject/context scene, set final_crop_motion to "pan_left_to_right" or "pan_right_to_left" unless panning would lose the main subject.
+* For pan_left_to_right, start the crop on the left/heavier/story-opening side and drift toward center or the secondary region; crop_anchor should usually be left_center or left_top for left-heavy scenes.
+* For pan_right_to_left, start the crop on the right/heavier/story-opening side and drift toward center or the secondary region; crop_anchor should usually be right_center or right_top for right-heavy scenes.
 * Use "static" only when panning is not listed or when the composition is not panoramic; then make clouds, water, foliage, fog, or reflections visibly move inside the frame.
 
 People/framing safety:
