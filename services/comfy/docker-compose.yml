@@ -6,7 +6,7 @@ services:
     image: pipeline-comfyui-local
     container_name: pipeline-comfyui
     restart: unless-stopped
-    command: ["python", "main.py", "--listen", "0.0.0.0", "--port", "8188", "--output-directory", "/data/outputs/comfy", "--cpu"]
+    command: ["python", "main.py", "--listen", "0.0.0.0", "--port", "8188", "--input-directory", "/data/inputs", "--output-directory", "/data/outputs/comfy", "--cpu"]
     ports:
       - "127.0.0.1:8188:8188"
     volumes:
