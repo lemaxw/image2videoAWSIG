@@ -1,0 +1,15 @@
+.git
+.gitignore
+.local
+video_input
+video_output
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv
+venv
+docs/*.mp4
+docs/*.jpg
+docs/*.png

@@ -30,13 +30,14 @@ Applied on every run (unless overridden by `--video-params-json`):
 
 ## Current pipeline
 
-The current pipeline has three backend families:
+The current pipeline has two generative models:
 
-1. Hunyuan 1.5 presets: cropped input image, or original image for wide pan scenes -> direct image-to-video
-2. SVD presets: cropped input image, or original image for wide pan scenes -> direct SVD img2vid
-3. AnimateDiff presets: cropped input image, or original image for wide pan scenes -> SD 1.5 + AnimateDiff motion module
+1. Wan 2.2 for landscapes, water, clouds, flora, architecture, and other environmental scenes.
+2. Hunyuan 1.5 when an important visible person, fauna, or vehicle needs motion.
 
-By default each image renders the selected primary preset plus the first fallback from a different backend family. If a selected-pair render attempt fails without OOM, the runner enqueues the next closest decision fallback before continuing.
+The semantic plan requests one to three candidate seeds from the selected model.
+Deterministic original-image presentation is recovery-only after generative attempts fail.
+If a render attempt fails without OOM, the runner enqueues the next decision fallback before continuing.
 For wide compositions where a vertical crop loses the story, variants can use the original image when `video.params.use_original_input_for_video=true`; final mux uses a 9:16 pan/crop rather than padding.
 
 The decision service selects the preset. Local defaults are quality defaults and clamp per backend.

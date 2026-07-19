@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import argparse
 from datetime import datetime
+import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -22,12 +24,11 @@ if __package__ is None or __package__ == "":
 
 from services.decision.decision_service import decide_for_image_detailed
 from services.orchestrator.comfy_client import ComfyClient, find_latest_mp4
-from services.orchestrator.mux import export_video_frame_image, mux_video_audio
+from services.orchestrator.mux import mux_video_audio
 from services.orchestrator.validate import validate_and_clamp_decision
 
 
 DEFAULT_VIDEO_OVERRIDES: Dict[str, Any] = {
-    "render_variants": "selected_pair",
 }
 
 
@@ -48,65 +49,21 @@ def _merge_animation_directions(overrides: Dict[str, Any], animation_directions:
 
 
 def _variant_key_for_preset(preset: str) -> str:
+    if preset.startswith("WAN22_"):
+        return "wan"
+    if preset == "DETERMINISTIC_ORIGINAL":
+        return "deterministic"
     if preset.startswith("HUNYUAN15_"):
         return "hunyuan"
-    if preset.startswith("ANIMATEDIFF_"):
-        return "animatediff"
-    return "svd"
+    raise ValueError(f"Unsupported video preset: {preset}")
 
 
 def _default_video_for_family(family: str, scene: Dict[str, Any]) -> Dict[str, Any]:
+    if family == "wan":
+        return validate_and_clamp_decision({"scene": scene, "video": {"preset": "WAN22_NATURAL"}, "fallbacks": []})["video"]
     if family == "hunyuan":
         return validate_and_clamp_decision({"scene": scene, "video": {"preset": "HUNYUAN15_I2V_720P"}, "fallbacks": []})["video"]
-    if family == "animatediff":
-        return validate_and_clamp_decision(
-            {
-                "scene": scene,
-                "video": {
-                    "preset": _animatediff_preset_for_scene(scene),
-                    "params": {"prompt": _scene_motion_prompt(scene, "cinematic anime-style environmental motion")},
-                },
-                "fallbacks": [],
-            }
-        )["video"]
-    return _boost_svd_for_scene(
-        validate_and_clamp_decision({"scene": scene, "video": {"preset": "SVD_STRONG"}, "fallbacks": []})["video"],
-        scene,
-    )
-
-
-def _animatediff_preset_for_scene(scene: Dict[str, Any]) -> str:
-    tags = " ".join(str(t).lower().replace("_", " ") for t in (scene.get("tags") or []))
-    if any(term in tags for term in ["city", "urban", "street", "night", "neon", "traffic", "paris", "eiffel"]):
-        return "ANIMATEDIFF_CITY_PULSE"
-    return "ANIMATEDIFF_GRASS_WIND"
-
-
-def _scene_motion_prompt(scene: Dict[str, Any], base: str) -> str:
-    tags = " ".join(str(t).lower().replace("_", " ") for t in (scene.get("tags") or []))
-    parts = [base]
-    if any(term in tags for term in ["cloud", "clouds", "sky", "skyline", "sunset"]):
-        parts.append("visible slow clouds drifting across the sky, subtle changing light in the clouds")
-    if any(term in tags for term in ["tree", "trees", "grass", "foliage", "forest", "park"]):
-        parts.append("gentle breeze moving leaves and treetops")
-    if any(term in tags for term in ["city", "urban", "street", "traffic", "paris", "eiffel", "rooftop", "rooftops"]):
-        parts.append("subtle city atmosphere, distant traffic movement, soft camera drift")
-    if any(term in tags for term in ["water", "lake", "river", "sea", "ocean", "reflection"]):
-        parts.append("soft water ripples and reflection shimmer")
-    parts.append("preserve original composition and subject identity")
-    return ", ".join(parts)[:300]
-
-
-def _boost_svd_for_scene(video_cfg: Dict[str, Any], scene: Dict[str, Any]) -> Dict[str, Any]:
-    tags = " ".join(str(t).lower().replace("_", " ") for t in (scene.get("tags") or []))
-    if not any(term in tags for term in ["cloud", "clouds", "sky", "skyline", "water", "lake", "sea", "ocean"]):
-        return video_cfg
-    out = json.loads(json.dumps(video_cfg))
-    params = out.get("params") if isinstance(out.get("params"), dict) else {}
-    params["motion_bucket_id"] = max(int(params.get("motion_bucket_id", 26)), 34)
-    params["augmentation_level"] = max(float(params.get("augmentation_level", 0.02)), 0.04)
-    out["params"] = params
-    return validate_and_clamp_decision({"scene": scene, "video": out, "fallbacks": []})["video"]
+    raise ValueError(f"Unsupported video family override: {family}")
 
 
 def _prepare_selected_video_variant(video_cfg: Dict[str, Any], decision: Dict[str, Any]) -> Dict[str, Any]:
@@ -154,7 +111,11 @@ def _video_variants_for_decision(decision: Dict[str, Any], requested: str = "all
     scene = decision.get("scene") if isinstance(decision.get("scene"), dict) else {}
 
     original = [cfg for cfg in [decision.get("video"), *(decision.get("fallbacks") or [])] if isinstance(cfg, dict)]
-    if requested in {"hunyuan", "svd", "animatediff"}:
+    if requested == "all":
+        # Recovery-only deterministic treatment is attempted only after all
+        # requested generative candidates fail; it is not a routine output.
+        selected = [cfg for cfg in original if not bool(cfg.get("recovery_only"))]
+    elif requested in {"wan", "hunyuan"}:
         selected = [decision["video"]]
         if _variant_key_for_preset(str(selected[0].get("preset", ""))) != requested:
             selected = [_default_video_for_family(requested, scene)]
@@ -162,15 +123,7 @@ def _video_variants_for_decision(decision: Dict[str, Any], requested: str = "all
         selected = [decision["video"]]
     else:
         primary = decision["video"]
-        primary_family = _variant_key_for_preset(str(primary.get("preset", "")))
-        selected = [primary]
-        for candidate in original[1:]:
-            if _variant_key_for_preset(str(candidate.get("preset", ""))) != primary_family:
-                selected.append(candidate)
-                break
-        if len(selected) == 1:
-            fallback_family = "animatediff" if primary_family == "hunyuan" else "hunyuan"
-            selected.append(_default_video_for_family(fallback_family, scene))
+        selected = [candidate for candidate in original if not bool(candidate.get("recovery_only"))][:2]
 
     for cfg in selected:
         _prepare_selected_video_variant(cfg, decision)
@@ -212,9 +165,9 @@ def _video_fit_for_attempt(video_cfg: Dict[str, Any], decision: Dict[str, Any], 
     params = video_cfg.get("params") if isinstance(video_cfg.get("params"), dict) else {}
     final_crop_motion = str(params.get("final_crop_motion", "")).strip().lower()
     if final_crop_motion == "static":
-        return "cover"
+        return "static_crop"
     if final_crop_motion in {"push_in", "pull_out"}:
-        return "cover"
+        return final_crop_motion
     if final_crop_motion == "pan_right_to_left":
         return "pan_right_to_left"
     if final_crop_motion == "pan_left_to_right":
@@ -239,10 +192,29 @@ def _output_aspect_for_attempt(video_cfg: Dict[str, Any], decision: Dict[str, An
     return "instagram_reel_9_16"
 
 
+def _zoom_for_attempt(video_cfg: Dict[str, Any]) -> tuple[float, float, float]:
+    params = video_cfg.get("params") if isinstance(video_cfg.get("params"), dict) else {}
+    try:
+        zoom_end = max(1.02, min(2.2, float(params.get("zoom_end", 1.06))))
+    except (TypeError, ValueError):
+        zoom_end = 1.06
+    focus: list[float] = []
+    for key in ("zoom_focus_x", "zoom_focus_y"):
+        try:
+            focus.append(max(0.0, min(1.0, float(params.get(key, 0.5)))))
+        except (TypeError, ValueError):
+            focus.append(0.5)
+    return zoom_end, focus[0], focus[1]
+
+
 def _pan_window_for_attempt(video_cfg: Dict[str, Any], decision: Dict[str, Any], render_input_mode: str) -> tuple[float, float]:
     if render_input_mode != "original":
         return 0.0, 1.0
     params = video_cfg.get("params") if isinstance(video_cfg.get("params"), dict) else {}
+    if str(params.get("final_crop_motion", "")).strip().lower() == "static":
+        anchor = str((decision.get("framing") or {}).get("crop_anchor", "center_center"))
+        position = 0.0 if anchor.startswith("left_") else 1.0 if anchor.startswith("right_") else 0.5
+        return position, position
     scene = decision.get("scene") if isinstance(decision.get("scene"), dict) else {}
     tags = " ".join(str(t).lower().replace("_", " ") for t in (scene.get("tags") or []))
     default_start, default_end = (0.56, 0.72) if "moon" in tags else (0.38, 0.54)
@@ -258,7 +230,7 @@ def _pan_window_for_attempt(video_cfg: Dict[str, Any], decision: Dict[str, Any],
         max_span = float(params.get("pan_max_span", 0.18))
     except (TypeError, ValueError):
         max_span = 0.18
-    max_span = max(0.05, min(0.25, max_span))
+    max_span = max(0.05, min(0.80, max_span))
     start = max(0.0, min(1.0, start))
     end = max(0.0, min(1.0, end))
     if abs(end - start) > max_span:
@@ -308,6 +280,14 @@ logger.setLevel(logging.INFO)
 def _log(level: str, msg: str, **fields: Any) -> None:
     fn = getattr(logger, level)
     fn(msg, extra={"extra": fields})
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _step_start(step: str, **fields: Any) -> float:
@@ -553,6 +533,20 @@ def _resolve_comfy_url(initial_url: str) -> str:
 
 def _build_workflow(comfy: ComfyClient, templates_root: Path, local_input: Path, output_prefix: str, video_cfg: Dict[str, Any]) -> Dict[str, Any]:
     preset = str(video_cfg.get("preset", ""))
+    if preset.startswith("WAN22_"):
+        return comfy.build_wan22_i2v_workflow(
+            templates_root / "wan22_i2v_workflow.json",
+            input_image=str(local_input),
+            output_prefix=output_prefix,
+            decision_video=video_cfg,
+        )
+    if preset == "DETERMINISTIC_ORIGINAL":
+        return comfy.build_deterministic_workflow(
+            templates_root / "deterministic_workflow.json",
+            input_image=str(local_input),
+            output_prefix=output_prefix,
+            decision_video=video_cfg,
+        )
     if preset.startswith("HUNYUAN15_"):
         return comfy.build_hunyuan15_i2v_workflow(
             templates_root / "hunyuan15_i2v_workflow.json",
@@ -560,19 +554,7 @@ def _build_workflow(comfy: ComfyClient, templates_root: Path, local_input: Path,
             output_prefix=output_prefix,
             decision_video=video_cfg,
         )
-    if preset.startswith("ANIMATEDIFF_"):
-        return comfy.build_animatediff_workflow(
-            templates_root / "animatediff_workflow.json",
-            input_image=str(local_input),
-            output_prefix=output_prefix,
-            decision_video=video_cfg,
-        )
-    return comfy.build_svd_workflow(
-        templates_root / "svd_workflow.json",
-        input_image=str(local_input),
-        output_prefix=output_prefix,
-        decision_video=video_cfg,
-    )
+    raise ValueError(f"Unsupported video preset: {preset}")
 
 
 def _video_expected_prefix(workflow: Dict[str, Any]) -> str:
@@ -687,7 +669,7 @@ def _prepare_instagram_input_image(source_path: Path, out_dir: Path, framing: Di
     with Image.open(source_path) as img:
         img = img.convert("RGB")
         width, height = img.size
-        target_ratio = 9.0 / 16.0
+        target_ratio = 1.0 if target_aspect == "square_1_1" else 9.0 / 16.0
         current_ratio = width / height if height > 0 else target_ratio
 
         if current_ratio > target_ratio:
@@ -726,6 +708,35 @@ def _export_jpeg(source_path: Path, output_path: Path, quality: int = 95) -> Non
     with Image.open(source_path) as img:
         img = img.convert("RGB")
         img.save(output_path, format="JPEG", quality=quality)
+
+
+def _export_source_presentation_image(
+    source_path: Path,
+    output_path: Path,
+    *,
+    output_aspect: str,
+    crop_anchor: str,
+    horizontal_position: float,
+) -> None:
+    """Export a matching still from the immutable source, not a generated frame."""
+    target_ratio = 1.0 if output_aspect == "square_1_1" else 9.0 / 16.0
+    with Image.open(source_path) as image:
+        image = image.convert("RGB")
+        width, height = image.size
+        if width / height > target_ratio:
+            crop_height = height
+            crop_width = max(1, int(round(height * target_ratio)))
+        else:
+            crop_width = width
+            crop_height = max(1, int(round(width / target_ratio)))
+        position = max(0.0, min(1.0, float(horizontal_position)))
+        x = int(round((width - crop_width) * position))
+        _, y_bias = _crop_anchor_offsets(crop_anchor)
+        y = int(round((height - crop_height) * y_bias))
+        cropped = image.crop((x, y, x + crop_width, y + crop_height))
+        size = (1080, 1080) if output_aspect == "square_1_1" else (1080, 1920)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cropped.resize(size, Image.Resampling.LANCZOS).save(output_path, "JPEG", quality=95)
 
 
 def _cleanup_intermediates(local_case_dir: Path, render_input: Path, source_input: Path, attempt: Dict[str, Any] | None) -> None:
@@ -803,8 +814,10 @@ def process_one_image(
             _step_failed("decision", t_decision_start, exc, job_id=job_id, input_key=input_key)
             raise
         decision = decision_result["decision"]
-        openai_meta = decision_result.get("openai", {})
+        decision_engine_meta = decision_result.get("decision_engine", {})
         image2json_meta = decision_result.get("image2json", {})
+        mempalace_meta = decision_result.get("mempalace", {})
+        semantic_plan = decision_result.get("semantic_plan", {})
         decision = _apply_video_overrides(decision, video_overrides)
         runtime_overrides = decision.get("runtime") if isinstance(decision.get("runtime"), dict) else {}
         decision = validate_and_clamp_decision(decision)
@@ -822,8 +835,10 @@ def process_one_image(
         render_input = cropped_input
         debug["decision"] = decision
         debug["framing"] = crop_info
-        debug["openai"] = openai_meta
+        debug["decision_engine"] = decision_engine_meta
         debug["image2json"] = image2json_meta
+        debug["mempalace"] = mempalace_meta
+        debug["semantic_plan"] = semantic_plan
         debug["timings"]["decision_s"] = round(time.time() - t_decision_start, 3)
         _log(
             "info",
@@ -831,23 +846,21 @@ def process_one_image(
             job_id=job_id,
             input_key=input_key,
             duration_s=debug["timings"]["decision_s"],
-            openai_model=openai_meta.get("model"),
-            openai_status=openai_meta.get("status", "unknown"),
-            openai_attempts=openai_meta.get("attempts", 0),
-            openai_input_tokens=openai_meta.get("usage", {}).get("input_tokens", 0),
-            openai_output_tokens=openai_meta.get("usage", {}).get("output_tokens", 0),
-            openai_total_tokens=openai_meta.get("usage", {}).get("total_tokens", 0),
+            decision_engine=decision_engine_meta.get("type"),
             image2json_enabled=image2json_meta.get("enabled"),
             image2json_used=image2json_meta.get("used"),
             image2json_model=image2json_meta.get("vision_model") or image2json_meta.get("model"),
             image2json_text_model=image2json_meta.get("text_model"),
             image2json_error=image2json_meta.get("error"),
             image2json_error_type=image2json_meta.get("error_type"),
+            mempalace_used=mempalace_meta.get("used"),
+            mempalace_case_count=len(mempalace_meta.get("cases") or []),
+            mempalace_error=mempalace_meta.get("error"),
             crop_anchor=crop_info.get("crop_anchor"),
             cropped_input=cropped_input.as_posix(),
         )
 
-        render_variants = str((decision.get("runtime") or {}).get("render_variants", "all"))
+        render_variants = str((decision.get("runtime") or {}).get("render_variants", "selected"))
         video_candidates: List[Dict[str, Any]] = _video_variants_for_decision(decision, render_variants)
         debug["render_variants"] = render_variants
         debug["planned_variants"] = [_planned_variant_entry(cfg) for cfg in video_candidates]
@@ -860,7 +873,8 @@ def process_one_image(
             attempt = {"index": idx, "video": video_cfg, "status": "started"}
             last_attempt = attempt
             t_render_start = time.time()
-            variant_key = _variant_key_for_preset(str(video_cfg.get("preset", "")))
+            variant_family = _variant_key_for_preset(str(video_cfg.get("preset", "")))
+            variant_key = f"{variant_family}_c{idx + 1}"
             _log("info", "image.render.attempt.start", job_id=job_id, input_key=input_key, attempt_index=idx, variant=variant_key, preset=video_cfg.get("preset"))
             try:
                 output_root = Path(os.environ.get("OUTPUT_DIR", "/data/outputs"))
@@ -964,6 +978,7 @@ def process_one_image(
                 video_fit = _video_fit_for_attempt(video_cfg, decision, render_input_mode)
                 pan_start, pan_end = _pan_window_for_attempt(video_cfg, decision, render_input_mode)
                 output_aspect = _output_aspect_for_attempt(video_cfg, decision, render_input_mode)
+                zoom_end, zoom_focus_x, zoom_focus_y = _zoom_for_attempt(video_cfg)
                 try:
                     mux_info = mux_video_audio(
                         video_path=video_path,
@@ -975,10 +990,19 @@ def process_one_image(
                         pan_end=pan_end,
                         output_aspect=output_aspect,
                         target_duration_s=audio_cfg["duration_s"],
+                        zoom_end=zoom_end,
+                        zoom_focus_x=zoom_focus_x,
+                        zoom_focus_y=zoom_focus_y,
                     )
                     final_still_name = f"final_{run_timestamp}_{variant_key}.jpg"
                     final_still = local_case_dir / final_still_name
-                    export_video_frame_image(final_mux, final_still)
+                    _export_source_presentation_image(
+                        local_input,
+                        final_still,
+                        output_aspect=output_aspect,
+                        crop_anchor=str((decision.get("framing") or {}).get("crop_anchor", "center_center")),
+                        horizontal_position=pan_start,
+                    )
                     _step_done(
                         "mux_video_audio",
                         t_mux,
@@ -995,6 +1019,9 @@ def process_one_image(
                 attempt["pan_start"] = pan_start
                 attempt["pan_end"] = pan_end
                 attempt["output_aspect"] = output_aspect
+                attempt["zoom_end"] = zoom_end
+                attempt["zoom_focus_x"] = zoom_focus_x
+                attempt["zoom_focus_y"] = zoom_focus_y
                 attempt.update(mux_info)
                 attempt["video_path"] = str(video_path)
                 attempt["audio_path"] = str(audio_path)
@@ -1005,10 +1032,13 @@ def process_one_image(
                 final_outputs.append(
                     {
                         "variant": variant_key,
+                        "family": variant_family,
                         "preset": str(video_cfg.get("preset", "")),
                         "path": str(final_mux),
                         "image_path": str(final_still),
                         "output_aspect": output_aspect,
+                        "attempt_index": idx,
+                        "video_config": video_cfg,
                     }
                 )
                 workflow_used = workflow
@@ -1037,7 +1067,7 @@ def process_one_image(
                 _log("error", "image.render.attempt.failed", job_id=job_id, input_key=input_key, attempt_index=idx, variant=variant_key, status="failed", duration_s=attempt["render_s"], preset=video_cfg.get("preset"), error=str(exc), error_type=exc.__class__.__name__)
                 if _is_oom_error(exc):
                     raise RuntimeError(f"Render aborted on OOM: preset={video_cfg.get('preset')} error={exc}") from exc
-                if render_variants == "selected_pair":
+                if idx >= len(video_candidates) - 1 and not final_outputs:
                     recovery = _enqueue_next_decision_fallback(video_candidates, decision, idx + 1)
                     if recovery is not None:
                         debug["planned_variants"] = [_planned_variant_entry(cfg) for cfg in video_candidates]
@@ -1076,6 +1106,50 @@ def process_one_image(
             image_key = f"{output_prefix.rstrip('/')}/{job_id}/{image_name}/{image_path.name}"
             io.write_output(image_path, image_key)
             item["image_output_key"] = image_key
+            result_path = local_case_dir / f"{mux_path.stem}.result.json"
+            attempt_index = int(item.get("attempt_index", 0))
+            attempt_record = debug["attempts"][attempt_index] if attempt_index < len(debug["attempts"]) else {}
+            result_record = {
+                "schema_version": "1.0",
+                "record_id": f"{job_id}:{image_name}:{mux_path.stem}",
+                "candidate_id": mux_path.stem,
+                "state": "HUMAN_REVIEW",
+                "source": {
+                    "input_key": input_key,
+                    "sha256": _sha256_file(local_input),
+                },
+                "analysis": image2json_meta.get("analysis"),
+                "retrieved_experience": mempalace_meta,
+                "semantic_plan": semantic_plan,
+                "technical_plan": item.get("video_config"),
+                "generation": attempt_record,
+                "presentation": {
+                    "output_aspect": item.get("output_aspect"),
+                    "video_fit": attempt_record.get("video_fit"),
+                    "pan_start": attempt_record.get("pan_start"),
+                    "pan_end": attempt_record.get("pan_end"),
+                    "zoom_end": attempt_record.get("zoom_end"),
+                    "zoom_focus_x": attempt_record.get("zoom_focus_x"),
+                    "zoom_focus_y": attempt_record.get("zoom_focus_y"),
+                },
+                "artifacts": {
+                    "video": final_key,
+                    "video_sha256": _sha256_file(mux_path),
+                    "image": image_key,
+                    "image_sha256": _sha256_file(image_path),
+                },
+                "human_feedback": {
+                    "status": "pending",
+                    "rating": None,
+                    "issue_codes": [],
+                    "notes": "",
+                    "reviewed_at": None,
+                },
+            }
+            result_path.write_text(json.dumps(result_record, indent=2), encoding="utf-8")
+            result_key = f"{output_prefix.rstrip('/')}/{job_id}/{image_name}/{result_path.name}"
+            io.write_output(result_path, result_key)
+            item["result_output_key"] = result_key
         io.write_output(cropped_path, cropped_key)
         debug["timings"]["upload_video_s"] = 0.0
 
@@ -1084,7 +1158,7 @@ def process_one_image(
         io.write_output(debug_path, debug_key)
         debug["timings"]["upload_debug_s"] = 0.0
 
-        _log("info", "image.done", job_id=job_id, input_key=input_key, status="success", output_keys=final_keys, total_s=debug["timings"]["total_s"], openai_total_tokens=debug.get("openai", {}).get("usage", {}).get("total_tokens", 0))
+        _log("info", "image.done", job_id=job_id, input_key=input_key, status="success", output_keys=final_keys, total_s=debug["timings"]["total_s"])
 
         if not debug_enabled:
             for item in final_outputs:
@@ -1125,6 +1199,14 @@ def main() -> int:
     parser.add_argument("--animation-directions", default="", help="Additional motion/style directions appended to video prompts.")
     args = parser.parse_args()
 
+    lock_path = Path(os.environ.get("ORCHESTRATOR_LOCK_PATH", "/tmp/image2video-orchestrator.lock"))
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    batch_lock = lock_path.open("w")
+    try:
+        fcntl.flock(batch_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        raise RuntimeError(f"Another orchestrator batch already owns {lock_path}") from exc
+
     input_dir = Path(args.local_input_dir).resolve()
     output_dir = Path(args.local_output_dir).resolve()
     if input_dir == output_dir:
@@ -1146,6 +1228,7 @@ def main() -> int:
     _control_comfy_container("start", reason="initial_comfy_health", job_id=args.job_id)
     comfy_url = _resolve_comfy_url(os.environ.get("COMFY_URL", "http://localhost:18188"))
     comfy = ComfyClient(comfy_url)
+    _log("info", "comfy.queue.reset", job_id=args.job_id, result=comfy.clear_queue())
     audio_url = os.environ.get("AUDIO_URL", "http://localhost:8000")
     templates_root = _resolve_templates_root()
 

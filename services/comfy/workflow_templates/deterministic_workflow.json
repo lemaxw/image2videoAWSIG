@@ -1,0 +1,6 @@
+{
+  "1": {"class_type": "LoadImage", "inputs": {"image": "__INPUT_IMAGE__"}},
+  "2": {"class_type": "ImageScale", "inputs": {"image": ["1", 0], "upscale_method": "lanczos", "width": __WIDTH__, "height": __HEIGHT__, "crop": "disabled"}},
+  "3": {"class_type": "RepeatImageBatch", "inputs": {"image": ["2", 0], "amount": __FRAMES__}},
+  "4": {"class_type": "VHS_VideoCombine", "inputs": {"images": ["3", 0], "frame_rate": __FPS__, "loop_count": 0, "filename_prefix": "__OUTPUT_PREFIX__", "format": "video/h264-mp4", "pix_fmt": "yuv420p", "crf": 18, "pingpong": false, "save_output": true}}
+}

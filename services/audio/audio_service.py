@@ -64,12 +64,12 @@ SOUND_WORDS = (
 )
 
 SCENE_SOUND_HINTS = (
-    (("forest", "trees", "woods", "meadow", "field", "flower", "grass", "hills", "countryside", "rural", "nature", "greenery", "mountain", "mountains"), "birds chirping, insects buzzing, leaves rustling"),
+    (("forest", "trees", "woods", "meadow", "field", "flower", "grass", "hills", "countryside", "rural", "nature", "greenery", "mountain", "mountains"), "distant occasional birds, soft leaves rustling"),
     (("interior", "room", "building", "architecture", "museum", "hall", "indoor"), "soft interior room tone, subtle air"),
     (("city", "urban", "street", "skyline", "paris", "eiffel", "avenue", "rooftops"), "distant traffic, occasional train, city ambience"),
     (("night", "neon", "bridge", "lights"), "soft city hum, distant traffic, gentle air"),
-    (("ocean", "sea", "shore", "waves", "beach"), "small waves, sea breeze, distant gulls"),
-    (("lake", "river", "water", "reflection"), "gentle water ripples, birds, light wind"),
+    (("ocean", "sea", "shore", "waves", "beach"), "small waves, distant gulls"),
+    (("lake", "river", "water", "reflection"), "gentle water ripples, distant occasional birds"),
     (("orchestra", "concert", "stage", "musicians", "trombone"), "soft room tone, quiet audience, warm brass resonance"),
 )
 
@@ -261,8 +261,7 @@ def _split_audio_candidates(audios: object) -> List[np.ndarray]:
 def _postprocess_with_ffmpeg(input_wav: Path, output_wav: Path, duration_s: int) -> None:
     if not input_wav.exists() or input_wav.stat().st_size < 64:
         raise RuntimeError(f"ffmpeg input wav missing or too small: {input_wav}")
-    # Slightly louder default so short ambience remains audible after muxing.
-    target_lufs = _env_float("AUDIO_TARGET_LUFS", -14.0)
+    target_lufs = _env_float("AUDIO_TARGET_LUFS", -18.0)
     true_peak = _env_float("AUDIO_TRUE_PEAK_DB", -1.0)
     # ffmpeg alimiter.limit expects linear gain (0.0625..1.0), not dB.
     alimiter_limit = max(0.0625, min(1.0, float(10 ** (true_peak / 20.0))))

@@ -6,6 +6,28 @@ from pathlib import Path
 from typing import Any, Dict
 
 import requests
+from PIL import Image
+
+
+TILED_VAE_TILE_SIZE = 512
+TILED_VAE_OVERLAP = 64
+TILED_VAE_TEMPORAL_SIZE = 64
+TILED_VAE_TEMPORAL_OVERLAP = 8
+
+
+def tiled_vae_decode_node(samples_node: str, vae_node: str) -> Dict[str, Any]:
+    """Build a spatially tiled decode without short temporal seam artifacts."""
+    return {
+        "class_type": "VAEDecodeTiled",
+        "inputs": {
+            "samples": [samples_node, 0],
+            "vae": [vae_node, 0],
+            "tile_size": TILED_VAE_TILE_SIZE,
+            "overlap": TILED_VAE_OVERLAP,
+            "temporal_size": TILED_VAE_TEMPORAL_SIZE,
+            "temporal_overlap": TILED_VAE_TEMPORAL_OVERLAP,
+        },
+    }
 
 
 class ComfyClient:
@@ -41,73 +63,6 @@ class ComfyClient:
         if self._object_info_cache is None:
             self._object_info_cache = self._request_json("GET", "/object_info", timeout=60)
         return self._object_info_cache
-
-    def resolve_svd_checkpoint(self, desired_ckpt: str = "svd_xt.safetensors") -> str:
-        try:
-            info = self.get_object_info()
-            loader_info = info.get("ImageOnlyCheckpointLoader", {})
-            input_cfg = loader_info.get("input", {})
-            required = input_cfg.get("required", {})
-            ckpt_meta = required.get("ckpt_name", [])
-            available = ckpt_meta[0] if isinstance(ckpt_meta, list) and ckpt_meta else []
-            if isinstance(available, list):
-                if not available:
-                    raise RuntimeError(
-                        "No checkpoints available in Comfy ImageOnlyCheckpointLoader. "
-                        "Place an SVD checkpoint under models/checkpoints."
-                    )
-                if desired_ckpt in available:
-                    return desired_ckpt
-                return available[0]
-        except Exception:
-            raise
-        return desired_ckpt
-
-    def resolve_sd_checkpoint(self, desired_ckpt: str = "v1-5-pruned-emaonly-fp16.safetensors") -> str:
-        info = self.get_object_info()
-        loader_info = info.get("CheckpointLoaderSimple", {})
-        input_cfg = loader_info.get("input", {})
-        required = input_cfg.get("required", {})
-        ckpt_meta = required.get("ckpt_name", [])
-        available = ckpt_meta[0] if isinstance(ckpt_meta, list) and ckpt_meta else []
-        if isinstance(available, list):
-            if not available:
-                raise RuntimeError(
-                    "No checkpoints available in Comfy CheckpointLoaderSimple. "
-                    "Place SD checkpoint under models/checkpoints."
-                )
-            if desired_ckpt in available:
-                return desired_ckpt
-            return available[0]
-        return desired_ckpt
-
-    def resolve_animatediff_motion_model(self, desired_motion_model: str = "mm_sd_v15_v2.ckpt") -> str:
-        info = self.get_object_info()
-        loader_info = info.get("ADE_LoadAnimateDiffModel", {})
-        input_cfg = loader_info.get("input", {})
-        required = input_cfg.get("required", {})
-        motion_meta = required.get("model_name", [])
-        available = motion_meta[0] if isinstance(motion_meta, list) and motion_meta else []
-        # Backward compatibility with legacy ADE node signatures.
-        if not available:
-            loader_info = info.get("ADE_AnimateDiffLoaderWithContext", {})
-            input_cfg = loader_info.get("input", {})
-            required = input_cfg.get("required", {})
-            motion_meta = required.get("model_name", [])
-            available = motion_meta[0] if isinstance(motion_meta, list) and motion_meta else []
-        if not available:
-            motion_meta = required.get("motion_model_name", [])
-            available = motion_meta[0] if isinstance(motion_meta, list) and motion_meta else []
-        if isinstance(available, list):
-            if not available:
-                raise RuntimeError(
-                    "No AnimateDiff motion models found in Comfy. "
-                    "Place motion model under models/animatediff_models."
-                )
-            if desired_motion_model in available:
-                return desired_motion_model
-            return available[0]
-        return desired_motion_model
 
     def _resolve_model_combo(self, node_name: str, input_name: str, desired_name: str, empty_hint: str) -> str:
         info = self.get_object_info()
@@ -154,6 +109,14 @@ class ComfyClient:
             input_name,
             desired_name,
             "No text encoders found in Comfy. Place text encoder files under models/text_encoders.",
+        )
+
+    def resolve_single_text_encoder(self, desired_name: str) -> str:
+        return self._resolve_model_combo(
+            "CLIPLoader",
+            "clip_name",
+            desired_name,
+            "No text encoders found in Comfy. Place model files under models/text_encoders.",
         )
 
     def wait_for_prompt(self, prompt_id: str, timeout_s: int | None = None) -> Dict[str, Any]:
@@ -229,6 +192,20 @@ class ComfyClient:
         except Exception as exc:
             return {"error": str(exc), "error_type": exc.__class__.__name__, "payload": payload}
 
+    def clear_queue(self) -> Dict[str, Any]:
+        """Interrupt orphaned work and remove pending prompts before a new batch."""
+        results: Dict[str, Any] = {}
+        for name, path, payload in (
+            ("interrupt", "/interrupt", {}),
+            ("clear", "/queue", {"clear": True}),
+        ):
+            try:
+                response = self.session.post(f"{self.base_url}{path}", json=payload, timeout=30)
+                results[name] = {"status_code": response.status_code, "ok": response.status_code < 400}
+            except Exception as exc:
+                results[name] = {"error": str(exc), "error_type": exc.__class__.__name__}
+        return results
+
     @staticmethod
     def _render_template(template_path: Path, substitutions: Dict[str, Any]) -> Dict[str, Any]:
         # Workflow JSON templates use placeholder tokens for runtime injection.
@@ -238,11 +215,20 @@ class ComfyClient:
         return json.loads(text)
 
     @staticmethod
-    def _resolve_dimensions(decision_video: Dict[str, Any]) -> tuple[int, int]:
+    def _resolve_dimensions(decision_video: Dict[str, Any], input_image: str | None = None) -> tuple[int, int]:
         params = decision_video.get("params", {})
         resolution = int(decision_video["resolution_width"])
         target_aspect = str(params.get("target_aspect", ""))
         max_dimension = int(params.get("max_dimension", 1280 if str(decision_video.get("preset", "")).startswith("HUNYUAN15_") else 768))
+
+        if bool(params.get("preserve_source_aspect")) and input_image:
+            with Image.open(input_image) as image:
+                source_width, source_height = image.size
+            long_edge = max(384, min(max_dimension, resolution))
+            scale = long_edge / max(source_width, source_height)
+            width = max(192, int(round((source_width * scale) / 16.0) * 16))
+            height = max(192, int(round((source_height * scale) / 16.0) * 16))
+            return min(max_dimension, width), min(max_dimension, height)
 
         # Instagram Reel mode: portrait 9:16.
         if target_aspect == "instagram_reel_9_16":
@@ -259,67 +245,9 @@ class ComfyClient:
         height = max(384, min(max_dimension, int(round(height / 64) * 64)))
         return width, height
 
-    def build_svd_workflow(self, template_path: Path, input_image: str, output_prefix: str, decision_video: Dict[str, Any]) -> Dict[str, Any]:
-        params = decision_video.get("params", {})
-        ckpt_name = self.resolve_svd_checkpoint()
-        width, height = self._resolve_dimensions(decision_video)
-        frames = int(decision_video["frames"])
-        fps = int(decision_video["fps"])
-        seed = int(decision_video["seed"])
-        return self._render_template(
-            template_path,
-            {
-                "__INPUT_IMAGE__": input_image,
-                "__CKPT_NAME__": ckpt_name,
-                "__WIDTH__": width,
-                "__HEIGHT__": height,
-                "__FRAMES__": frames,
-                "__FPS__": fps,
-                "__SEED__": seed,
-                "__STEPS__": int(params.get("steps", 16)),
-                "__MOTION_BUCKET_ID__": int(params.get("motion_bucket_id", 30)),
-                "__AUGMENTATION_LEVEL__": float(params.get("augmentation_level", 0.0)),
-                "__OUTPUT_PREFIX__": f"{output_prefix}-{uuid.uuid4().hex[:6]}",
-            },
-        )
-
-    def build_animatediff_workflow(self, template_path: Path, input_image: str, output_prefix: str, decision_video: Dict[str, Any]) -> Dict[str, Any]:
-        params = decision_video.get("params", {})
-        ckpt_name = self.resolve_sd_checkpoint(str(params.get("ckpt_name", "v1-5-pruned-emaonly-fp16.safetensors")))
-        motion_module = self.resolve_animatediff_motion_model(
-            str(params.get("motion_module", params.get("motion_model_name", "mm_sd_v15_v2.ckpt")))
-        )
-        motion_strength = float(params.get("motion_strength", 35))
-        denoise = max(0.2, min(0.95, motion_strength / 100.0))
-        width, height = self._resolve_dimensions(decision_video)
-        frames = int(params.get("frames", decision_video["frames"]))
-        fps = int(params.get("fps", decision_video["fps"]))
-        seed = int(params.get("seed", decision_video["seed"]))
-        return self._render_template(
-            template_path,
-            {
-                "__CKPT_NAME__": ckpt_name,
-                "__INPUT_IMAGE__": input_image,
-                "__WIDTH__": width,
-                "__HEIGHT__": height,
-                "__PROMPT__": params.get("prompt", "cinematic scene with subtle movement"),
-                "__NEGATIVE_PROMPT__": params.get("negative_prompt", "low quality, blurry, distorted"),
-                "__MOTION_MODULE__": motion_module,
-                "__CONTEXT_LENGTH__": int(params.get("context_length", 16)),
-                "__CONTEXT_OVERLAP__": int(params.get("context_overlap", 4)),
-                "__FRAMES__": frames,
-                "__FPS__": fps,
-                "__SEED__": seed,
-                "__STEPS__": int(params.get("steps", 18)),
-                "__CFG__": float(params.get("cfg", 3.5)),
-                "__DENOISE__": denoise,
-                "__OUTPUT_PREFIX__": f"{output_prefix}-{uuid.uuid4().hex[:6]}",
-            },
-        )
-
     def build_hunyuan15_i2v_workflow(self, template_path: Path, input_image: str, output_prefix: str, decision_video: Dict[str, Any]) -> Dict[str, Any]:
         params = decision_video.get("params", {})
-        width, height = self._resolve_dimensions(decision_video)
+        width, height = self._resolve_dimensions(decision_video, input_image)
         frames = int(decision_video["frames"])
         fps = int(decision_video["fps"])
         seed = int(decision_video["seed"])
@@ -341,7 +269,7 @@ class ComfyClient:
         diffusion_model = self.resolve_diffusion_model(
             str(params.get("diffusion_model", "hunyuanvideo1.5_720p_i2v_fp16.safetensors"))
         )
-        return self._render_template(
+        workflow = self._render_template(
             template_path,
             {
                 "__INPUT_IMAGE__": input_image,
@@ -361,6 +289,55 @@ class ComfyClient:
                 "__STEPS__": int(params.get("steps", 20)),
                 "__CFG__": float(params.get("cfg", 6.0)),
                 "__SHIFT__": float(params.get("shift", 7.0)),
+                "__OUTPUT_PREFIX__": f"{output_prefix}-{uuid.uuid4().hex[:6]}",
+            },
+        )
+        if bool(params.get("tiled_vae")):
+            workflow["16"] = tiled_vae_decode_node("15", "3")
+        return workflow
+
+    def build_wan22_i2v_workflow(self, template_path: Path, input_image: str, output_prefix: str, decision_video: Dict[str, Any]) -> Dict[str, Any]:
+        params = decision_video.get("params", {})
+        width, height = self._resolve_dimensions(decision_video, input_image)
+        prompt = str(params.get("prompt", "Natural environmental motion. Preserve the original composition and viewpoint."))
+        negative_prompt = str(params.get("negative_prompt", "flicker, jitter, unstable geometry, inconsistent appearance, scene transition, low quality"))
+        workflow = self._render_template(
+            template_path,
+            {
+                "__INPUT_IMAGE__": input_image,
+                "__DIFFUSION_MODEL__": self.resolve_diffusion_model(str(params.get("diffusion_model", "wan2.2_ti2v_5B_fp16.safetensors"))),
+                "__WEIGHT_DTYPE__": str(params.get("weight_dtype", "default")),
+                "__TEXT_ENCODER__": self.resolve_single_text_encoder(str(params.get("text_encoder", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"))),
+                "__VAE_NAME__": self.resolve_vae(str(params.get("vae_name", "wan2.2_vae.safetensors"))),
+                "__PROMPT_JSON__": json.dumps(prompt),
+                "__NEGATIVE_PROMPT_JSON__": json.dumps(negative_prompt),
+                "__WIDTH__": width,
+                "__HEIGHT__": height,
+                "__FRAMES__": int(decision_video["frames"]),
+                "__FPS__": int(decision_video["fps"]),
+                "__SEED__": int(decision_video["seed"]),
+                "__STEPS__": int(params.get("steps", 20)),
+                "__CFG__": float(params.get("cfg", 5.0)),
+                "__SHIFT__": float(params.get("shift", 8.0)),
+                "__SAMPLER__": str(params.get("sampler_name", "uni_pc")),
+                "__SCHEDULER__": str(params.get("scheduler", "simple")),
+                "__OUTPUT_PREFIX__": f"{output_prefix}-{uuid.uuid4().hex[:6]}",
+            },
+        )
+        if bool(params.get("tiled_vae", False)):
+            workflow["10"] = tiled_vae_decode_node("9", "3")
+        return workflow
+
+    def build_deterministic_workflow(self, template_path: Path, input_image: str, output_prefix: str, decision_video: Dict[str, Any]) -> Dict[str, Any]:
+        width, height = self._resolve_dimensions(decision_video, input_image)
+        return self._render_template(
+            template_path,
+            {
+                "__INPUT_IMAGE__": input_image,
+                "__WIDTH__": width,
+                "__HEIGHT__": height,
+                "__FRAMES__": int(decision_video.get("frames", 150)),
+                "__FPS__": int(decision_video.get("fps", 30)),
                 "__OUTPUT_PREFIX__": f"{output_prefix}-{uuid.uuid4().hex[:6]}",
             },
         )
@@ -389,32 +366,4 @@ def find_latest_mp4(history_payload: Dict[str, Any], output_root: Path, expected
 
     raise FileNotFoundError(
         f"No mp4 output found from ComfyUI history (expected_prefix={expected_prefix or '<any>'})"
-    )
-
-
-def find_latest_image(history_payload: Dict[str, Any], output_root: Path, expected_prefix: str = "") -> Path:
-    candidates = []
-    outputs = history_payload.get("outputs", {})
-    for node_out in outputs.values():
-        for item in node_out.get("images", []):
-            filename = item.get("filename", "")
-            if filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-                path = output_root / "comfy" / filename
-                if path.exists():
-                    candidates.append(path)
-    if candidates:
-        return sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)[0]
-
-    patterns = ["*.png", "*.jpg", "*.jpeg", "*.webp"]
-    fallback = []
-    for pattern in patterns:
-        if expected_prefix:
-            fallback.extend((output_root / "comfy").glob(f"{expected_prefix}*{Path(pattern).suffix}"))
-        else:
-            fallback.extend((output_root / "comfy").glob(pattern))
-    if fallback:
-        return sorted(fallback, key=lambda p: p.stat().st_mtime, reverse=True)[0]
-
-    raise FileNotFoundError(
-        f"No image output found from ComfyUI history (expected_prefix={expected_prefix or '<any>'})"
     )

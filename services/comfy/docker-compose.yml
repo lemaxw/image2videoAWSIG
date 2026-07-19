@@ -1,4 +1,23 @@
 services:
+  memory:
+    build:
+      context: ../..
+      dockerfile: services/memory/Dockerfile
+    container_name: pipeline-memory
+    restart: unless-stopped
+    environment:
+      - MEMPALACE_DISABLE_STDIO_REDIRECT=1
+      - MEMPALACE_PALACE_PATH=/root/.mempalace/palace
+    volumes:
+      - ${MEMPALACE_HOME_DIR:-/home/lemaxw/.mempalace}:/root/.mempalace
+    ports:
+      - "127.0.0.1:${MEMPALACE_HOST_PORT:-8090}:8090"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
   comfyui:
     build:
       context: ../..
@@ -36,7 +55,7 @@ services:
       - AUDIO_GUIDANCE_SCALE=${AUDIO_GUIDANCE_SCALE:-3.5}
       - AUDIO_NUM_SAMPLES=${AUDIO_NUM_SAMPLES:-3}
       - AUDIO_SEED_BASE=${AUDIO_SEED_BASE:-42}
-      - AUDIO_TARGET_LUFS=${AUDIO_TARGET_LUFS:--14}
+      - AUDIO_TARGET_LUFS=${AUDIO_TARGET_LUFS:--18}
       - AUDIO_TRUE_PEAK_DB=${AUDIO_TRUE_PEAK_DB:--1.0}
       - AUDIO_BASS_GAIN_DB=${AUDIO_BASS_GAIN_DB:-0}
       - AUDIO_STEREO_MLEV=${AUDIO_STEREO_MLEV:-0}
@@ -70,13 +89,17 @@ services:
     environment:
       - COMFY_URL=http://comfyui:8188
       - AUDIO_URL=http://audio:8000
-      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-5.4-mini}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - IMAGE2JSON_ENABLED=${IMAGE2JSON_ENABLED:-true}
       - IMAGE2JSON_URL=${IMAGE2JSON_URL:-http://host.docker.internal:11434}
       - IMAGE2JSON_MODEL=${IMAGE2JSON_MODEL:-qwen3-vl:8b}
       - IMAGE2JSON_TEXT_MODEL=${IMAGE2JSON_TEXT_MODEL:-qwen3:14b}
       - IMAGE2JSON_TIMEOUT=${IMAGE2JSON_TIMEOUT:-300}
+      - MEMPALACE_ENABLED=${MEMPALACE_ENABLED:-true}
+      - MEMPALACE_URL=http://memory:8090
+      - MEMPALACE_WING=${MEMPALACE_WING:-image2videoAWSIG}
+      - MEMPALACE_RESULTS=${MEMPALACE_RESULTS:-3}
+      - MEMPALACE_TIMEOUT=${MEMPALACE_TIMEOUT:-90}
+      - MEMPALACE_REQUIRED=${MEMPALACE_REQUIRED:-false}
       - MODEL_SERVICE_CONTROL=${MODEL_SERVICE_CONTROL:-docker}
       - AUDIO_CONTAINER_NAME=${AUDIO_CONTAINER_NAME:-pipeline-audio}
       - COMFY_CONTAINER_NAME=${COMFY_CONTAINER_NAME:-pipeline-comfyui}
@@ -94,6 +117,8 @@ services:
       - /tmp:/tmp
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
+      memory:
+        condition: service_healthy
       comfyui:
         condition: service_started
       audio:

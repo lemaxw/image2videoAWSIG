@@ -123,10 +123,16 @@ shift: 7.0
 sampler/scheduler: Euler/simple
 seed: compare at least two; seed 1 won this image
 VAE: tiled decode, tile_size 512, overlap 64,
-     temporal_size 16, temporal_overlap 4
+     temporal_size 64, temporal_overlap 8
 ```
 
 The successful seed-1 run took about 243 seconds. Full-batch VAE decoding restarted Comfy after sampling, while tiled temporal decoding completed reliably. At 97 frames/20 FPS the model completed but temporarily collapsed the scooter into a grid-like structure. At 960x720, 97 frames sampled at about 75 seconds per step and was operationally unusable; 960x720/61 also proved unstable during handoff. More frames were not better for identity-sensitive motion.
+
+Correction from the 2026-07-14 raw-frame audit: the short `16/4` temporal decode
+window itself caused periodic grid frames in both Wan and Hunyuan. Same-seed
+`64/8` tiled-decode controls removed the grid while remaining stable. Production
+therefore uses spatial tiles of 512/64 and temporal tiles of 64/8. The 61-frame
+Hunyuan recommendation remains, but the old 16/4 decoder recipe is rejected.
 
 Artifacts:
 

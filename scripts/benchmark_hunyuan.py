@@ -24,7 +24,10 @@ def main() -> int:
     parser.add_argument("--negative-prompt", default="flicker, jitter, warped geometry, disappearing objects, added objects")
     parser.add_argument("--frames", type=int, default=30)
     parser.add_argument("--fps", type=int, default=6)
-    parser.add_argument("--steps", type=int, default=14)
+    parser.add_argument("--steps", type=int, default=50)
+    parser.add_argument("--cfg", type=float, default=6.0)
+    parser.add_argument("--shift", type=float, default=7.0)
+    parser.add_argument("--weight-dtype", choices=("default", "fp8_e4m3fn"), default="fp8_e4m3fn")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--resolution-width", type=int, default=704)
     parser.add_argument("--width", type=int, default=0, help="Explicit native render width; overrides aspect resolution")
@@ -52,9 +55,9 @@ def main() -> int:
             "prompt": args.prompt,
             "negative_prompt": args.negative_prompt,
             "steps": args.steps,
-            "cfg": 5.8,
-            "shift": 7.0,
-            "weight_dtype": "fp8_e4m3fn",
+            "cfg": args.cfg,
+            "shift": args.shift,
+            "weight_dtype": args.weight_dtype,
             "diffusion_model": "hunyuanvideo1.5_720p_i2v_fp16.safetensors",
             "text_encoder_1": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
             "text_encoder_2": "byt5_small_glyphxl_fp16.safetensors",
@@ -100,6 +103,9 @@ def main() -> int:
             "frames": args.frames,
             "fps": args.fps,
             "steps": args.steps,
+            "cfg": args.cfg,
+            "shift": args.shift,
+            "weight_dtype": args.weight_dtype,
             "width": args.width or workflow["9"]["inputs"]["width"],
             "height": args.height or workflow["9"]["inputs"]["height"],
             "tiled_vae": args.tiled_vae,

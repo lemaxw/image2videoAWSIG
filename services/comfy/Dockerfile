@@ -24,13 +24,15 @@ RUN git init /opt/ComfyUI \
 
 WORKDIR /opt/ComfyUI
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir --force-reinstall \
+    && pip install --no-cache-dir \
          --index-url ${PYTORCH_INDEX_URL} \
          --extra-index-url ${PYPI_INDEX_URL} \
          torch==${TORCH_VERSION} \
          torchvision==${TORCHVISION_VERSION} \
-         torchaudio==${TORCHAUDIO_VERSION}
+         torchaudio==${TORCHAUDIO_VERSION} \
+    && grep -Ev '^(torch|torchvision|torchaudio)([<=>~! ]|$)' requirements.txt > /tmp/comfy-requirements.txt \
+    && pip install --no-cache-dir -r /tmp/comfy-requirements.txt \
+    && rm /tmp/comfy-requirements.txt
 
 # Required by workflow templates that use VHS_VideoCombine.
 RUN git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /opt/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite \
@@ -38,20 +40,5 @@ RUN git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.
          pip install --no-cache-dir -r /opt/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt; \
        fi
 
-# AnimateDiff Evolved
-RUN git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-AnimateDiff-Evolved.git /opt/ComfyUI/custom_nodes/ComfyUI-AnimateDiff-Evolved \
-    && if [ -f /opt/ComfyUI/custom_nodes/ComfyUI-AnimateDiff-Evolved/requirements.txt ]; then \
-         pip install --no-cache-dir -r /opt/ComfyUI/custom_nodes/ComfyUI-AnimateDiff-Evolved/requirements.txt; \
-       fi
-
-# Vision helpers used by the layered landscape pipeline. These are installed in
-# the Comfy image for direct inference; their official checkpoints stay in the
-# mounted model volume under models/sam2 and models/depth_anything.
-RUN git clone --depth 1 https://github.com/facebookresearch/sam2.git /opt/sam2 \
-    && pip install --no-cache-dir -e /opt/sam2
-
-RUN git clone --depth 1 https://github.com/DepthAnything/Depth-Anything-V2.git /opt/Depth-Anything-V2 \
-    && pip install --no-cache-dir -r /opt/Depth-Anything-V2/requirements.txt
-              
 EXPOSE 8188
 CMD ["python", "main.py", "--listen", "0.0.0.0", "--port", "8188", "--output-directory", "/data/outputs/comfy", "--cpu"]

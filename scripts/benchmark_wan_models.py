@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run isolated Wan 2.2 or Wan VACE benchmarks against ComfyUI."""
+"""Run isolated Wan 2.2 benchmarks against ComfyUI."""
 
 from __future__ import annotations
 
@@ -38,7 +38,16 @@ def loader_nodes(model: str, vae: str) -> dict[str, dict]:
     }
 
 
-def output_nodes(fps: int, prefix: str, conditioning_node: str, latent_output: int = 0) -> dict[str, dict]:
+def output_nodes(
+    fps: int,
+    prefix: str,
+    conditioning_node: str,
+    latent_output: int = 0,
+    *,
+    cfg: float = 5.0,
+    shift: float = 8.0,
+    sampler_name: str = "uni_pc",
+) -> dict[str, dict]:
     return {
         "9": {
             "class_type": "KSampler",
@@ -46,8 +55,8 @@ def output_nodes(fps: int, prefix: str, conditioning_node: str, latent_output: i
                 "model": ["7", 0],
                 "seed": 42,
                 "steps": 20,
-                "cfg": 5.0,
-                "sampler_name": "uni_pc",
+                "cfg": cfg,
+                "sampler_name": sampler_name,
                 "scheduler": "simple",
                 "positive": [conditioning_node, 0] if conditioning_node == "8" else ["5", 0],
                 "negative": [conditioning_node, 1] if conditioning_node == "8" else ["6", 0],
@@ -74,91 +83,31 @@ def output_nodes(fps: int, prefix: str, conditioning_node: str, latent_output: i
 
 
 def build_workflow(args: argparse.Namespace) -> dict[str, dict]:
-    if args.model == "wan22":
-        workflow = loader_nodes("wan2.2_ti2v_5B_fp16.safetensors", "wan2.2_vae.safetensors")
-        workflow["8"] = {
-            "class_type": "Wan22ImageToVideoLatent",
-            "inputs": {
-                "vae": ["3", 0],
-                "width": args.width,
-                "height": args.height,
-                "length": args.frames,
-                "batch_size": 1,
-                "start_image": ["4", 0],
-            },
-        }
-        workflow.update(output_nodes(args.fps, f"wan-benchmark/{args.name}", "wan22", 0))
-        workflow["9"]["inputs"]["latent_image"] = ["8", 0]
-    else:
-        workflow = loader_nodes("wan2.1_vace_1.3B_fp16.safetensors", "wan_2.1_vae.safetensors")
-        workflow["8"] = {
-            "class_type": "WanVaceToVideo",
-            "inputs": {
-                "positive": ["5", 0],
-                "negative": ["6", 0],
-                "vae": ["3", 0],
-                "width": args.width,
-                "height": args.height,
-                "length": args.frames,
-                "batch_size": 1,
-                "strength": 1.0,
-                "reference_image": ["4", 0],
-            },
-        }
-        if args.mask_image:
-            workflow["12"] = {"class_type": "LoadImage", "inputs": {"image": args.mask_image}}
-            workflow["13"] = {
-                "class_type": "RepeatImageBatch",
-                "inputs": {"image": ["4", 0], "amount": args.frames},
-            }
-            workflow["14"] = {
-                "class_type": "RepeatImageBatch",
-                "inputs": {"image": ["12", 0], "amount": args.frames},
-            }
-            workflow["15"] = {
-                "class_type": "ImageToMask",
-                "inputs": {"image": ["14", 0], "channel": "red"},
-            }
-            workflow["8"]["inputs"]["control_video"] = ["13", 0]
-            workflow["8"]["inputs"]["control_masks"] = ["15", 0]
-        workflow.update(output_nodes(args.fps, f"wan-benchmark/{args.name}", "8", 2))
-
-    if args.composite_mask:
-        workflow["20"] = {"class_type": "LoadImage", "inputs": {"image": args.composite_mask}}
-        workflow["21"] = {
-            "class_type": "ImageScale",
-            "inputs": {
-                "image": ["4", 0],
-                "upscale_method": "lanczos",
-                "width": args.width,
-                "height": args.height,
-                "crop": "center",
-            },
-        }
-        workflow["22"] = {
-            "class_type": "RepeatImageBatch",
-            "inputs": {"image": ["21", 0], "amount": args.frames},
-        }
-        workflow["23"] = {
-            "class_type": "RepeatImageBatch",
-            "inputs": {"image": ["20", 0], "amount": args.frames},
-        }
-        workflow["24"] = {
-            "class_type": "ImageToMask",
-            "inputs": {"image": ["23", 0], "channel": "red"},
-        }
-        workflow["25"] = {
-            "class_type": "ImageCompositeMasked",
-            "inputs": {
-                "destination": ["22", 0],
-                "source": ["10", 0],
-                "x": 0,
-                "y": 0,
-                "resize_source": False,
-                "mask": ["24", 0],
-            },
-        }
-        workflow["11"]["inputs"]["images"] = ["25", 0]
+    workflow = loader_nodes("wan2.2_ti2v_5B_fp16.safetensors", "wan2.2_vae.safetensors")
+    workflow["8"] = {
+        "class_type": "Wan22ImageToVideoLatent",
+        "inputs": {
+            "vae": ["3", 0],
+            "width": args.width,
+            "height": args.height,
+            "length": args.frames,
+            "batch_size": 1,
+            "start_image": ["4", 0],
+        },
+    }
+    workflow.update(
+        output_nodes(
+            args.fps,
+            f"wan-benchmark/{args.name}",
+            "wan22",
+            0,
+            cfg=args.cfg,
+            shift=args.shift,
+            sampler_name=args.sampler_name,
+        )
+    )
+    workflow["7"]["inputs"]["shift"] = args.shift
+    workflow["9"]["inputs"]["latent_image"] = ["8", 0]
 
     workflow["4"]["inputs"]["image"] = args.input_image
     workflow["5"]["inputs"]["text"] = args.prompt
@@ -170,18 +119,18 @@ def build_workflow(args: argparse.Namespace) -> dict[str, dict]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=("wan22", "vace13"), required=True)
     parser.add_argument("--name", required=True)
     parser.add_argument("--input-image", required=True)
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--negative-prompt", default=NEGATIVE)
-    parser.add_argument("--mask-image", default="")
-    parser.add_argument("--composite-mask", default="")
     parser.add_argument("--width", type=int, default=768)
     parser.add_argument("--height", type=int, default=448)
     parser.add_argument("--frames", type=int, default=49)
     parser.add_argument("--fps", type=int, default=10)
     parser.add_argument("--steps", type=int, default=20)
+    parser.add_argument("--cfg", type=float, default=5.0)
+    parser.add_argument("--shift", type=float, default=8.0)
+    parser.add_argument("--sampler-name", default="uni_pc")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--comfy-url", default="http://comfyui:8188")
     parser.add_argument("--output-dir", default="/data/outputs/wan-benchmark")
@@ -201,7 +150,7 @@ def main() -> int:
         shutil.copy2(raw_path, final_path)
         result = {
             "name": args.name,
-            "model": args.model,
+            "model": "wan22",
             "status": "success",
             "prompt_id": prompt_id,
             "input_image": args.input_image,
@@ -210,6 +159,9 @@ def main() -> int:
             "frames": args.frames,
             "fps": args.fps,
             "steps": args.steps,
+            "cfg": args.cfg,
+            "shift": args.shift,
+            "sampler_name": args.sampler_name,
             "seed": args.seed,
             "prompt": args.prompt,
             "path": str(final_path),

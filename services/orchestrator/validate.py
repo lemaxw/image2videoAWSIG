@@ -3,12 +3,10 @@ import random
 from typing import Any, Dict, List
 
 ALLOWED_PRESETS = {
+    "WAN22_NATURAL",
+    "DETERMINISTIC_ORIGINAL",
     "HUNYUAN15_I2V_720P",
     "HUNYUAN15_I2V_FAST",
-    "SVD_SUBTLE",
-    "SVD_STRONG",
-    "ANIMATEDIFF_GRASS_WIND",
-    "ANIMATEDIFF_CITY_PULSE",
 }
 
 ALLOWED_CROP_ANCHORS = {
@@ -84,17 +82,11 @@ TEXTURE_WORDS = {
 
 def _audio_profile_for_preset(preset: str) -> Dict[str, str]:
     profiles = {
-        "SVD_SUBTLE": {
-            "audio": "soft environmental ambience, no music",
+        "WAN22_NATURAL": {
+            "audio": "quiet natural environmental ambience, no music",
         },
-        "SVD_STRONG": {
-            "audio": "warm atmospheric ambience, no music",
-        },
-        "ANIMATEDIFF_GRASS_WIND": {
-            "audio": "birds chirping, insects buzzing, leaves rustling, no music",
-        },
-        "ANIMATEDIFF_CITY_PULSE": {
-            "audio": "distant traffic, soft city hum, no music",
+        "DETERMINISTIC_ORIGINAL": {
+            "audio": "quiet environmental ambience, no music",
         },
         "HUNYUAN15_I2V_720P": {
             "audio": "realistic environmental ambience, no music",
@@ -103,7 +95,7 @@ def _audio_profile_for_preset(preset: str) -> Dict[str, str]:
             "audio": "soft realistic ambience, no music",
         },
     }
-    return profiles.get(preset, profiles["SVD_SUBTLE"])
+    return profiles.get(preset, profiles["WAN22_NATURAL"])
 
 
 def _merge_prompt_hints(*parts: Any, limit: int = 300) -> str:
@@ -127,6 +119,8 @@ def _motion_control_params(params: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     if bool(params.get("use_original_input_for_video")):
         out["use_original_input_for_video"] = True
+    if bool(params.get("preserve_source_aspect")):
+        out["preserve_source_aspect"] = True
     final_crop_motion = str(params.get("final_crop_motion", "")).strip().lower()
     if final_crop_motion in {"static", "pan_left_to_right", "pan_right_to_left", "push_in", "pull_out"}:
         out["final_crop_motion"] = final_crop_motion
@@ -139,23 +133,61 @@ def _motion_control_params(params: Dict[str, Any]) -> Dict[str, Any]:
         except (TypeError, ValueError):
             pass
     try:
-        out["pan_max_span"] = float(clamp(float(params.get("pan_max_span")), 0.05, 0.25))
+        out["zoom_end"] = float(clamp(float(params.get("zoom_end")), 1.02, 2.2))
+    except (TypeError, ValueError):
+        pass
+    for key in ("zoom_focus_x", "zoom_focus_y"):
+        try:
+            out[key] = float(clamp(float(params.get(key)), 0.0, 1.0))
+        except (TypeError, ValueError):
+            pass
+    if str(params.get("zoom_mode", "")).strip().lower() == "enter_frame":
+        out["zoom_mode"] = "enter_frame"
+    try:
+        out["pan_max_span"] = float(clamp(float(params.get("pan_max_span")), 0.05, 0.80))
     except (TypeError, ValueError):
         pass
     output_aspect = str(params.get("output_aspect", "")).strip().lower()
     if output_aspect in {"instagram_reel_9_16", "square_1_1"}:
         out["output_aspect"] = output_aspect
+    must_keep_visible = params.get("must_keep_visible")
+    if isinstance(must_keep_visible, list):
+        out["must_keep_visible"] = [str(item)[:100] for item in must_keep_visible[:10]]
+    focus_region = params.get("focus_region")
+    if isinstance(focus_region, dict) and isinstance(focus_region.get("box"), dict):
+        try:
+            box = {
+                key: float(clamp(float(focus_region["box"][key]), 0.0, 1.0))
+                for key in ("x", "y", "w", "h")
+            }
+            out["focus_region"] = {
+                "label": str(focus_region.get("label", ""))[:100],
+                "box": box,
+                "source": str(focus_region.get("source", ""))[:100],
+            }
+        except (KeyError, TypeError, ValueError):
+            pass
+    required_regions = params.get("required_regions")
+    if isinstance(required_regions, list):
+        cleaned_regions = []
+        for region in required_regions[:10]:
+            if not isinstance(region, dict) or not isinstance(region.get("box"), dict):
+                continue
+            try:
+                cleaned_regions.append(
+                    {
+                        "label": str(region.get("label", ""))[:100],
+                        "box": {key: float(clamp(float(region["box"][key]), 0.0, 1.0)) for key in ("x", "y", "w", "h")},
+                        "source": str(region.get("source", ""))[:100],
+                    }
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        out["required_regions"] = cleaned_regions
+    visibility = params.get("visibility_validation")
+    if isinstance(visibility, dict):
+        out["visibility_validation"] = copy.deepcopy(visibility)
     return out
-
-
-def _motion_bucket_for_scene(scene: Dict[str, Any], preset: str, current_value: int) -> int:
-    text = _scene_tags_text(scene)
-    value = current_value
-    if any(term in text for term in ["car", "cars", "traffic", "highway", "streetlights", "street lights", "road"]):
-        value = max(value, 28 if preset in {"SVD_STRONG", "ANIMATEDIFF_CITY_PULSE"} else 24)
-    if any(term in text for term in ["water", "sea", "ocean", "lake", "river", "cloud", "clouds", "sky"]):
-        value = max(value, 20)
-    return clamp_int(value, 10, 80)
 
 
 def _compose_audio_prompt(preset: str, scene: Dict[str, Any], audio: Dict[str, Any], current_prompt: str) -> str:
@@ -168,13 +200,13 @@ def _compose_audio_prompt(preset: str, scene: Dict[str, Any], audio: Dict[str, A
 
     scene_audio = ""
     if any(term in tags_text for term in ["forest", "tree", "trees", "woods", "meadow", "field", "flower", "grass", "hill", "hills", "countryside", "rural", "nature", "greenery", "mountain", "mountains"]):
-        scene_audio = "birds chirping, insects buzzing, leaves rustling"
+        scene_audio = "distant occasional birds, soft leaves rustling"
     elif any(term in tags_text for term in ["city", "urban", "street", "skyline", "paris", "eiffel", "avenue", "rooftops"]):
         scene_audio = "distant traffic, soft city hum"
     elif any(term in tags_text for term in ["ocean", "sea", "shore", "waves", "beach"]):
-        scene_audio = "small waves, sea breeze, distant gulls"
+        scene_audio = "small waves, distant gulls"
     elif any(term in tags_text for term in ["lake", "river", "water", "reflection"]):
-        scene_audio = "gentle water ripples, birds, light wind"
+        scene_audio = "gentle water ripples, distant occasional birds"
     elif any(term in tags_text for term in ["interior", "room", "building", "architecture", "museum", "hall", "indoor"]):
         scene_audio = "soft interior room tone, subtle air"
     elif any(term in tags_text for term in ["orchestra", "concert", "stage", "musicians", "trombone"]):
@@ -205,27 +237,6 @@ def clamp_int(value: Any, low: int, high: int) -> int:
     return int(clamp(ivalue, low, high))
 
 
-def _motion_strength_value(value: Any, default: int) -> int:
-    if isinstance(value, str):
-        named = {
-            "very_low": 20,
-            "very low": 20,
-            "low": 32,
-            "medium": 48,
-            "high": 62,
-        }
-        key = value.strip().lower().replace("-", "_")
-        if key in named:
-            return named[key]
-        key = key.replace("_", " ")
-        if key in named:
-            return named[key]
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def _nearest_mult_64(width: int, high: int = 768) -> int:
     # Comfy workflows and many diffusion checkpoints are more stable on /64 widths.
     rounded = int(round(width / 64.0) * 64)
@@ -245,13 +256,44 @@ def _resolve_seed(video: Dict[str, Any], params: Dict[str, Any], default_seed: A
 
 def default_video_for_preset(preset: str) -> Dict[str, Any]:
     profiles: Dict[str, Dict[str, Any]] = {
+        "WAN22_NATURAL": {
+            "fps": 20,
+            "frames": 97,
+            "resolution_width": 768,
+            "params": {
+                "steps": 20,
+                "cfg": 5.0,
+                "shift": 8.0,
+                "sampler_name": "uni_pc",
+                "scheduler": "simple",
+                "weight_dtype": "default",
+                "diffusion_model": "wan2.2_ti2v_5B_fp16.safetensors",
+                "text_encoder": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                "vae_name": "wan2.2_vae.safetensors",
+                "negative_prompt": "flicker, jitter, unstable geometry, inconsistent appearance, scene transition, low quality",
+                "tiled_vae": False,
+                "preserve_source_aspect": True,
+                "use_original_input_for_video": True,
+            },
+        },
+        "DETERMINISTIC_ORIGINAL": {
+            "fps": 30,
+            "frames": 150,
+            "resolution_width": 1080,
+            "params": {
+                "preserve_source_aspect": True,
+                "use_original_input_for_video": True,
+                "final_crop_motion": "static",
+                "output_aspect": "square_1_1",
+            },
+        },
         "HUNYUAN15_I2V_720P": {
-            "fps": 6,
-            "frames": 30,
+            "fps": 12,
+            "frames": 61,
             "resolution_width": 704,
             "params": {
-                "steps": 14,
-                "cfg": 5.8,
+                "steps": 50,
+                "cfg": 6.0,
                 "shift": 7.0,
                 "weight_dtype": "fp8_e4m3fn",
                 "diffusion_model": "hunyuanvideo1.5_720p_i2v_fp16.safetensors",
@@ -259,6 +301,9 @@ def default_video_for_preset(preset: str) -> Dict[str, Any]:
                 "text_encoder_2": "byt5_small_glyphxl_fp16.safetensors",
                 "clip_vision_name": "sigclip_vision_patch14_384.safetensors",
                 "vae_name": "hunyuanvideo15_vae_fp16.safetensors",
+                "tiled_vae": True,
+                "preserve_source_aspect": True,
+                "use_original_input_for_video": True,
                 "negative_prompt": "low quality, blurry, distorted, deformed, text, watermark, flicker, jitter",
             },
         },
@@ -267,8 +312,10 @@ def default_video_for_preset(preset: str) -> Dict[str, Any]:
             "frames": 30,
             "resolution_width": 704,
             "params": {
-                "steps": 12,
-                "cfg": 5.5,
+                # This machine has the full checkpoint, not the 8/12-step
+                # distilled checkpoint. "FAST" reduces temporal length only.
+                "steps": 50,
+                "cfg": 6.0,
                 "shift": 7.0,
                 "weight_dtype": "fp8_e4m3fn",
                 "diffusion_model": "hunyuanvideo1.5_720p_i2v_fp16.safetensors",
@@ -276,63 +323,14 @@ def default_video_for_preset(preset: str) -> Dict[str, Any]:
                 "text_encoder_2": "byt5_small_glyphxl_fp16.safetensors",
                 "clip_vision_name": "sigclip_vision_patch14_384.safetensors",
                 "vae_name": "hunyuanvideo15_vae_fp16.safetensors",
+                "tiled_vae": True,
                 "negative_prompt": "low quality, blurry, distorted, deformed, text, watermark, flicker, jitter",
             },
         },
-        "SVD_STRONG": {
-            "fps": 7,
-            "frames": 35,
-            "resolution_width": 832,
-            "params": {
-                "motion_bucket_id": 26,
-                "steps": 25,
-                "augmentation_level": 0.02,
-            },
-        },
-        "SVD_SUBTLE": {
-            "fps": 7,
-            "frames": 35,
-            "resolution_width": 768,
-            "params": {
-                "motion_bucket_id": 18,
-                "steps": 25,
-                "augmentation_level": 0.0,
-            },
-        },
-        "ANIMATEDIFF_GRASS_WIND": {
-            "fps": 7,
-            "frames": 35,
-            "resolution_width": 768,
-            "params": {
-                "ckpt_name": "meinamix_v11.safetensors",
-                "motion_module": "mm_sd_v15_v2.ckpt",
-                "prompt": "anime landscape, gentle wind, grass and foliage moving softly, cinematic ambient motion, preserve original composition",
-                "negative_prompt": "low quality, blurry, distorted, deformed, bad anatomy, text, watermark, flicker",
-                "steps": 20,
-                "cfg": 4.0,
-                "motion_strength": 42,
-                "context_length": 16,
-                "context_overlap": 4,
-            },
-        },
-        "ANIMATEDIFF_CITY_PULSE": {
-            "fps": 7,
-            "frames": 35,
-            "resolution_width": 768,
-            "params": {
-                "ckpt_name": "counterfeit_v30.safetensors",
-                "motion_module": "mm_sd_v15_v2.ckpt",
-                "prompt": "cinematic anime city scene, subtle camera drift, reflections and lights pulsing softly, preserve original composition",
-                "negative_prompt": "low quality, blurry, distorted, deformed, bad anatomy, text, watermark, flicker",
-                "steps": 20,
-                "cfg": 4.2,
-                "motion_strength": 40,
-                "context_length": 16,
-                "context_overlap": 4,
-            },
-        },
     }
-    profile = profiles.get(preset, profiles["SVD_SUBTLE"])
+    if preset not in profiles:
+        raise ValueError(f"Unsupported video preset: {preset}")
+    profile = profiles[preset]
     return {
         "preset": preset,
         "duration_s": 5,
@@ -347,10 +345,10 @@ def default_video_for_preset(preset: str) -> Dict[str, Any]:
 def _validate_video(video: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(video, dict):
         video = {}
-    requested_preset = str(video.get("preset", "SVD_SUBTLE"))
+    requested_preset = str(video.get("preset", "WAN22_NATURAL"))
     preset = requested_preset
     if preset not in ALLOWED_PRESETS:
-        preset = "SVD_SUBTLE"
+        raise ValueError(f"Unsupported video preset: {requested_preset}")
 
     # Start from preset defaults, then overlay model output.
     preset_defaults = default_video_for_preset(preset)
@@ -360,27 +358,23 @@ def _validate_video(video: Dict[str, Any]) -> Dict[str, Any]:
     v.update({k: video.get(k, v[k]) for k in ["duration_s", "fps", "frames", "resolution_width", "seed"]})
     v["params"] = {**default_params, **incoming_params}
     v["preset"] = preset
+    v["recovery_only"] = bool(video.get("recovery_only", False))
 
     params = v.get("params") or {}
     v["duration_s"] = 3 if int(video.get("duration_s", params.get("duration_s", v.get("duration_s", 5)))) == 3 else 5
-    is_hunyuan = preset.startswith("HUNYUAN15_")
-    fps_max = int(preset_defaults["fps"]) if is_hunyuan else 10
-    frame_max = int(preset_defaults["frames"]) if is_hunyuan else 35
-    resolution_max = int(preset_defaults["resolution_width"]) if is_hunyuan else 832
+    fps_max = int(preset_defaults["fps"])
+    frame_max = int(preset_defaults["frames"])
+    resolution_max = int(preset_defaults["resolution_width"])
     requested_fps = video.get("fps", params.get("fps", v.get("fps", 6)))
     try:
         requested_fps_int = int(requested_fps)
     except (TypeError, ValueError):
-        requested_fps_int = int(preset_defaults["fps"])
-    if not is_hunyuan and requested_fps_int > fps_max:
         requested_fps_int = int(preset_defaults["fps"])
     v["fps"] = clamp_int(requested_fps_int, 3, fps_max)
     requested_frames = video.get("frames", params.get("frames", v.get("frames", 20)))
     try:
         requested_frames_int = int(requested_frames)
     except (TypeError, ValueError):
-        requested_frames_int = int(preset_defaults["frames"])
-    if not is_hunyuan and requested_frames_int > frame_max:
         requested_frames_int = int(preset_defaults["frames"])
     min_frames_for_duration = v["duration_s"] * v["fps"]
     v["frames"] = clamp_int(max(requested_frames_int, min_frames_for_duration), 10, frame_max)
@@ -391,7 +385,40 @@ def _validate_video(video: Dict[str, Any]) -> Dict[str, Any]:
     v["seed"] = _resolve_seed(video, params, v.get("seed"))
 
     # Clamp preset-specific parameters to safe execution ranges.
-    if preset.startswith("HUNYUAN15_"):
+    if preset == "DETERMINISTIC_ORIGINAL":
+        v["params"] = {
+            "duration_s": v["duration_s"],
+            "fps": v["fps"],
+            "frames": v["frames"],
+            "resolution_width": v["resolution_width"],
+            "seed": v["seed"],
+            "requested_preset": requested_preset,
+            **_motion_control_params(params),
+        }
+    elif preset.startswith("WAN22_"):
+        prompt_hint = _merge_prompt_hints(params.get("prompt", ""), params.get("animation_directions", ""), limit=420)
+        v["params"] = {
+            "prompt": prompt_hint or "Natural environmental motion. Preserve the original composition and viewpoint.",
+            "negative_prompt": _limit_text(params.get("negative_prompt", default_params.get("negative_prompt", "")), 220),
+            "steps": clamp_int(params.get("steps", 20), 20, 20),
+            "cfg": float(clamp(float(params.get("cfg", 5.0)), 5.0, 5.0)),
+            "shift": float(clamp(float(params.get("shift", 8.0)), 8.0, 8.0)),
+            "sampler_name": "uni_pc",
+            "scheduler": "simple",
+            "weight_dtype": str(params.get("weight_dtype", "default"))[:40],
+            "diffusion_model": str(params.get("diffusion_model", "wan2.2_ti2v_5B_fp16.safetensors"))[:160],
+            "text_encoder": str(params.get("text_encoder", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"))[:160],
+            "vae_name": str(params.get("vae_name", "wan2.2_vae.safetensors"))[:160],
+            "tiled_vae": bool(params.get("tiled_vae", default_params.get("tiled_vae", False))),
+            "duration_s": v["duration_s"],
+            "fps": v["fps"],
+            "frames": v["frames"],
+            "resolution_width": v["resolution_width"],
+            "seed": v["seed"],
+            "requested_preset": requested_preset,
+            **_motion_control_params(params),
+        }
+    elif preset.startswith("HUNYUAN15_"):
         prompt_hint = _merge_prompt_hints(params.get("prompt", ""), params.get("video_prompt", ""), params.get("animation_directions", ""))
         v["params"] = {
             "prompt": prompt_hint
@@ -411,21 +438,7 @@ def _validate_video(video: Dict[str, Any]) -> Dict[str, Any]:
             "text_encoder_2": str(params.get("text_encoder_2", "byt5_small_glyphxl_fp16.safetensors"))[:160],
             "clip_vision_name": str(params.get("clip_vision_name", "sigclip_vision_patch14_384.safetensors"))[:160],
             "vae_name": str(params.get("vae_name", "hunyuanvideo15_vae_fp16.safetensors"))[:160],
-            "duration_s": v["duration_s"],
-            "fps": v["fps"],
-            "frames": v["frames"],
-            "resolution_width": v["resolution_width"],
-            "seed": v["seed"],
-            "requested_preset": requested_preset,
-            **_motion_control_params(params),
-        }
-    elif preset.startswith("SVD"):
-        motion_strength = clamp_int(_motion_strength_value(params.get("motion_strength"), 35), 10, 80)
-        mapped_motion = clamp_int(int(round(motion_strength * 0.75)), 10, 80)
-        v["params"] = {
-            "motion_bucket_id": clamp_int(params.get("motion_bucket_id", mapped_motion), 10, 80),
-            "steps": clamp_int(params.get("steps", 16), 12, 25),
-            "augmentation_level": float(clamp(float(params.get("augmentation_level", 0.0)), 0.0, 0.08)),
+            "tiled_vae": bool(params.get("tiled_vae", default_params.get("tiled_vae", True))),
             "duration_s": v["duration_s"],
             "fps": v["fps"],
             "frames": v["frames"],
@@ -435,25 +448,7 @@ def _validate_video(video: Dict[str, Any]) -> Dict[str, Any]:
             **_motion_control_params(params),
         }
     else:
-        prompt_hint = _merge_prompt_hints(params.get("prompt", ""), params.get("animation_directions", ""))
-        v["params"] = {
-            "steps": clamp_int(params.get("steps", 18), 12, 24),
-            "ckpt_name": str(params.get("ckpt_name", params.get("anime_ckpt_name", "meinamix_v11.safetensors")))[:160],
-            "motion_module": str(params.get("motion_module", params.get("motion_model_name", "mm_sd_v15_v2.ckpt")))[:160],
-            "prompt": prompt_hint or str(params.get("prompt", "cinematic anime scene with subtle motion, preserve original composition"))[:300],
-            "negative_prompt": str(params.get("negative_prompt", "low quality, blurry, distorted, deformed, bad anatomy, text, watermark, flicker"))[:240],
-            "cfg": float(clamp(float(params.get("cfg", 4.0)), 1.0, 7.0)),
-            "motion_strength": clamp_int(_motion_strength_value(params.get("motion_strength"), 40), 20, 70),
-            "context_length": clamp_int(params.get("context_length", 16), 8, 24),
-            "context_overlap": clamp_int(params.get("context_overlap", 4), 0, 8),
-            "duration_s": v["duration_s"],
-            "fps": v["fps"],
-            "frames": v["frames"],
-            "resolution_width": v["resolution_width"],
-            "seed": v["seed"],
-            "requested_preset": requested_preset,
-            **_motion_control_params(params),
-        }
+        raise ValueError(f"Unsupported video preset: {preset}")
 
     return v
 
@@ -474,8 +469,11 @@ def validate_and_clamp_decision(raw: Dict[str, Any]) -> Dict[str, Any]:
     anchor = str(framing.get("crop_anchor", "center_center"))
     if anchor not in ALLOWED_CROP_ANCHORS:
         anchor = "center_center"
+    target_aspect = str(framing.get("target_aspect", "instagram_reel_9_16"))
+    if target_aspect not in {"instagram_reel_9_16", "square_1_1"}:
+        target_aspect = "instagram_reel_9_16"
     framing_out = {
-        "target_aspect": "instagram_reel_9_16",
+        "target_aspect": target_aspect,
         "crop_anchor": anchor,
     }
 
@@ -485,8 +483,8 @@ def validate_and_clamp_decision(raw: Dict[str, Any]) -> Dict[str, Any]:
     audio_out = {
         "prompt": " ".join(str(audio.get("prompt", "soft ambience")).split())[:220],
         "duration_s": 3 if int(audio.get("duration_s", video["duration_s"])) == 3 else 5,
-        # Keep audio clearly audible in final mux by default.
-        "mix_db": float(clamp(float(audio.get("mix_db", -2.0)), -3.0, 6.0)),
+        # Ambience should sit behind the image rather than dominate it.
+        "mix_db": float(clamp(float(audio.get("mix_db", -6.0)), -18.0, 0.0)),
     }
     for key in (
         "prompt_source",
@@ -507,12 +505,18 @@ def validate_and_clamp_decision(raw: Dict[str, Any]) -> Dict[str, Any]:
     for candidate in fallbacks_raw[:2]:
         fallbacks.append(_validate_video(candidate))
 
-    # Contract requires exactly two fallback candidates.
+    # Candidate 1 stays in the selected model family with an independent seed;
+    # candidate 2 is deterministic recovery and is never rendered routinely.
     while len(fallbacks) < 2:
         if len(fallbacks) == 0:
-            fallbacks.append(default_video_for_preset("SVD_SUBTLE"))
+            candidate = default_video_for_preset(video["preset"])
+            candidate["seed"] = _resolve_seed({}, {}, None)
+            candidate["params"]["seed"] = candidate["seed"]
+            fallbacks.append(candidate)
         else:
-            fallbacks.append(default_video_for_preset("ANIMATEDIFF_GRASS_WIND"))
+            recovery = default_video_for_preset("DETERMINISTIC_ORIGINAL")
+            recovery["recovery_only"] = True
+            fallbacks.append(recovery)
 
     scene_out = {
         "tags": [str(t)[:50] for t in (scene.get("tags") or [])[:8]],
@@ -524,17 +528,6 @@ def validate_and_clamp_decision(raw: Dict[str, Any]) -> Dict[str, Any]:
         current_prompt = str(video["params"].get("prompt", "")).strip()
         if scene_text != "original scene" and scene_text not in current_prompt.lower():
             video["params"]["prompt"] = _limit_text(f"{current_prompt}, {scene_text}".strip(" ,"), 300)
-    elif str(video["preset"]).startswith("ANIMATEDIFF_"):
-        scene_text = _scene_terms(scene_out)
-        current_prompt = str(video["params"].get("prompt", "")).strip()
-        if scene_text != "original scene" and scene_text not in current_prompt.lower():
-            video["params"]["prompt"] = _limit_text(f"{current_prompt}, {scene_text}".strip(" ,"), 300)
-    if "motion_bucket_id" in video["params"]:
-        video["params"]["motion_bucket_id"] = _motion_bucket_for_scene(
-            scene_out,
-            video["preset"],
-            int(video["params"].get("motion_bucket_id", 18)),
-        )
     audio_out["prompt"] = _compose_audio_prompt(video["preset"], scene_out, audio_out, audio_out["prompt"])
     for fb in fallbacks:
         if str(fb["preset"]).startswith("HUNYUAN15_"):
@@ -542,17 +535,6 @@ def validate_and_clamp_decision(raw: Dict[str, Any]) -> Dict[str, Any]:
             current_prompt = str(fb["params"].get("prompt", "")).strip()
             if scene_text != "original scene" and scene_text not in current_prompt.lower():
                 fb["params"]["prompt"] = _limit_text(f"{current_prompt}, {scene_text}".strip(" ,"), 300)
-        elif str(fb["preset"]).startswith("ANIMATEDIFF_"):
-            scene_text = _scene_terms(scene_out)
-            current_prompt = str(fb["params"].get("prompt", "")).strip()
-            if scene_text != "original scene" and scene_text not in current_prompt.lower():
-                fb["params"]["prompt"] = _limit_text(f"{current_prompt}, {scene_text}".strip(" ,"), 300)
-        if "motion_bucket_id" in fb["params"]:
-            fb["params"]["motion_bucket_id"] = _motion_bucket_for_scene(
-                scene_out,
-                fb["preset"],
-                int(fb["params"].get("motion_bucket_id", 18)),
-            )
 
     return {
         "scene": scene_out,

@@ -56,6 +56,23 @@ The source `6_20250516_125456.jpg` is 4080x3060 (4:3). Literal native generation
 - Seed 1 was visually better than seed 0: the red scooter and both riders remain present and recognizable while moving, and the complete street context is retained.
 - 704x528, 97 frames, 20 FPS, seed 1 with tiled VAE completed in 423.7 seconds, but the scooter temporarily collapsed into a grid-like structure and identity degraded. More generated frames reduced quality for this moving-subject case.
 
+### 2026-07-14 tiled-decode correction
+
+Later frame-by-frame inspection showed that the periodic checkerboard/grid and
+brightness pulses were produced by the unusually short `temporal_size=16`,
+`temporal_overlap=4` VAE decode window, not solely by Hunyuan sampling. The same
+artifact appeared in Wan clips using that decoder configuration. Controlled
+same-seed rerenders changed only the decoder to ComfyUI's `64/8` temporal window:
+
+- Wan valley, 97 frames: the grid disappeared and Comfy remained stable; total
+  prompt execution was 126.55 seconds.
+- Hunyuan scooter, 61 frames: the grid disappeared and Comfy remained stable;
+  total client-observed execution was 222.17 seconds.
+
+Production keeps spatial tiling (`tile_size=512`, `overlap=64`) for memory safety
+but uses `temporal_size=64`, `temporal_overlap=8`. The earlier `16/4` artifacts
+must not be interpreted as evidence that a seed or prompt caused checkerboarding.
+
 The recommended Hunyuan parameters for this hardware and subject type are therefore:
 
 ```text
@@ -69,7 +86,7 @@ cfg: 5.8
 shift: 7.0
 sampler/scheduler: Euler / simple
 seed strategy: render 2 candidates; seed 1 won this case
-VAE decode: tiled, 512px tiles, 64px overlap, 16-frame temporal tiles, 4-frame overlap
+VAE decode: tiled, 512px tiles, 64px overlap, 64-frame temporal tiles, 8-frame overlap
 presentation: upscale accepted output after generation; do not pre-crop the source
 ```
 

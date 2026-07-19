@@ -28,7 +28,7 @@ Read [README.md]($HOME/hobby/image2videoAWSIG/README.md) first.
 
 ## Decision service: image2json + Ollama text model
 
-The decision service now uses a two-step local flow instead of OpenAI:
+The decision service uses a mandatory two-step local flow:
 
 1. **Step 1**: `image2json` (vision model `qwen3-vl:8b`) analyzes the image and returns structured JSON
 2. **Step 2**: Ollama text model (`qwen3:14b`) processes the image2json JSON and outputs the decision JSON
@@ -42,9 +42,9 @@ The decision service now uses a two-step local flow instead of OpenAI:
 
 **Behavior**:
 - If `IMAGE2JSON_ENABLED=true` and image2json is installed, the two-step flow is used
-- If either step fails, the system exits (no fallback to OpenAI)
+- If either step fails, the system exits; there is no alternate decision backend
 - `IMAGE2JSON_MODEL` must remain the vision model `qwen3-vl:8b`; `IMAGE2JSON_TEXT_MODEL` is the text model `qwen3:14b`
-- The text model receives both the `TEXT_MODEL_SYSTEM_PROMPT` and `DECISION_SCHEMA` in the prompt
+- The text model receives both `SEMANTIC_SYSTEM_PROMPT` and `SEMANTIC_DECISION_SCHEMA`
 - Decision metadata includes `image2json` section with `vision_model`, `text_model`, `analysis`, and `text_response`
 - Ollama vision/text models are unloaded between decision steps so they do not keep GPU memory for later stages
 
@@ -76,8 +76,7 @@ Read rooms in this order when relevant:
 4. Relevant `case-*` rooms: specific prior bug diagnoses and known failure patterns.
 5. Pipeline rooms as needed:
    - `pipeline-hunyuan`
-   - `pipeline-svd`
-   - `pipeline-animatediff`
+   - current Wan benchmark and semantic-pipeline rooms
 6. `decision-prompt`: current decision preset-selection and motion/framing prompt rules.
 7. `audio`: audio backend, device, prompt, and recreate-container notes.
 8. `validation`: known verification commands/results and recent test artifacts.

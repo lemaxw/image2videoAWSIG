@@ -14,7 +14,7 @@ Local-only image-to-video pipeline (no AWS/S3/AMI/infra flow).
   - Runs ComfyUI and executes render workflows.
   - Uses workflow templates in `services/comfy/workflow_templates/`.
   - Outputs rendered media to `/data/outputs/comfy`.
-  - Current batch mode renders the selected primary preset plus the first fallback from a different backend family.
+  - Current batch mode renders one to three seeds from the selected WAN or Hunyuan motion plan.
 - `services/audio`:
   - FastAPI service for audio generation.
   - Backends:
@@ -30,7 +30,7 @@ Local-only image-to-video pipeline (no AWS/S3/AMI/infra flow).
   - Main batch runner (`run_batch.py`).
   - Loads local images, calls decision service, prepares an IG 9:16 crop,
     renders selected variants with Comfy, generates audio, muxes final mp4s, exports matching JPG stills, writes `debug.json`.
-  - Wide Hunyuan pan scenes can use the original image and `video.params.output_aspect=square_1_1`
+  - Wide scenes can use the original image and `video.params.output_aspect=square_1_1`
     when a vertical Reel crop would be too zoomed. The matching JPG still is extracted from the final cropped video.
 
 ## Flow
@@ -47,20 +47,18 @@ flowchart LR
 
     B --> E[prepare IG crop<br/>9:16 anchor]
     B --> F[keep original image<br/>for wide pan scenes]
-    B --> G[plan render variants<br/>selected_pair default]
+    B --> G[plan render candidates<br/>one to three seeds]
 
     G --> H{render input}
     E --> H
     F --> H
 
-    H --> I{Comfy preset family}
-    I --> J[Hunyuan 1.5<br/>direct I2V]
-    I --> K[SVD<br/>direct img2vid]
-    I --> L[AnimateDiff<br/>SD 1.5 + motion module]
+    H --> I{selected model}
+    I --> J[Wan 2.2<br/>environmental scenes]
+    I --> K[Hunyuan 1.5<br/>important people fauna vehicles]
 
     J --> M[raw Comfy MP4]
     K --> M
-    L --> M
 
     M --> N[stop/free Comfy<br/>release memory]
     N --> O[start audio service]
@@ -92,34 +90,20 @@ flowchart LR
 Create model folders:
 
 ```bash
-mkdir -p "${MODEL_DIR:-$PWD/.local/models}"/{checkpoints,diffusion_models,text_encoders,vae,clip_vision,animatediff_models}
+mkdir -p "${MODEL_DIR:-$PWD/.local/models}"/{diffusion_models,text_encoders,vae,clip_vision}
 ```
 
-Download required checkpoints:
+Wan 2.2 models:
 
 ```bash
-curl -L "https://huggingface.co/stabilityai/stable-video-diffusion-img2vid-xt/resolve/main/svd_xt.safetensors?download=true" \
-  -o "${MODEL_DIR:-$PWD/.local/models}/checkpoints/svd_xt.safetensors"
+curl -L "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors?download=true" \
+  -o "${MODEL_DIR:-$PWD/.local/models}/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors"
 
-curl -L "https://huggingface.co/Comfy-Org/stable-diffusion-v1-5-archive/resolve/main/v1-5-pruned-emaonly-fp16.safetensors?download=true" \
-  -o "${MODEL_DIR:-$PWD/.local/models}/checkpoints/v1-5-pruned-emaonly-fp16.safetensors"
-```
+curl -L "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors?download=true" \
+  -o "${MODEL_DIR:-$PWD/.local/models}/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
 
-Anime SD 1.5 checkpoints used by AnimateDiff profile defaults:
-
-```bash
-curl -L "https://huggingface.co/Xiero/Meinamix/resolve/e19075878a33073d3f5e6e16e19f82ab7056719f/meinamix_meinaV11.safetensors?download=true" \
-  -o "${MODEL_DIR:-$PWD/.local/models}/checkpoints/meinamix_v11.safetensors"
-
-curl -L "https://huggingface.co/gsdf/Counterfeit-V3.0/resolve/main/Counterfeit-V3.0_fp16.safetensors?download=true" \
-  -o "${MODEL_DIR:-$PWD/.local/models}/checkpoints/counterfeit_v30.safetensors"
-```
-
-AnimateDiff motion model:
-
-```bash
-curl -L "https://huggingface.co/guoyww/animatediff/resolve/main/mm_sd_v15_v2.ckpt?download=true" \
-  -o "${MODEL_DIR:-$PWD/.local/models}/animatediff_models/mm_sd_v15_v2.ckpt"
+curl -L "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan2.2_vae.safetensors?download=true" \
+  -o "${MODEL_DIR:-$PWD/.local/models}/vae/wan2.2_vae.safetensors"
 ```
 
 Modern HunyuanVideo 1.5 I2V models for the RTX 3090 presets:
@@ -144,24 +128,22 @@ curl -L "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/ma
 Verify:
 
 ```bash
-ls -lh "${MODEL_DIR:-$PWD/.local/models}/checkpoints"
+find "${MODEL_DIR:-$PWD/.local/models}"/{diffusion_models,text_encoders,vae,clip_vision} -maxdepth 1 -type f -printf '%p\n' | sort
 ```
 
 Current model selection:
 
+- `WAN22_NATURAL` is the default generative route for landscapes, water, clouds,
+  flora, architecture, and other environmental scenes without an important
+  visible person, fauna/animal, or vehicle.
 - `HUNYUAN15_I2V_720P` / `HUNYUAN15_I2V_FAST` run direct HunyuanVideo 1.5 image-to-video.
-- `SVD_SUBTLE` / `SVD_STRONG` run direct SVD img2vid from the cropped input, or original input when wide-pan preservation is requested.
-- `ANIMATEDIFF_GRASS_WIND` / `ANIMATEDIFF_CITY_PULSE` run direct AnimateDiff img2vid from the cropped input, or original input when wide-pan preservation is requested.
-- Core SVD video model: `svd_xt.safetensors`
-- Core AnimateDiff motion model: `mm_sd_v15_v2.ckpt`
-- AnimateDiff presets use:
-  - `meinamix_v11.safetensors`
-  - `counterfeit_v30.safetensors`
-- The separate animated still redraw step and low-memory presets are removed from the active pipeline.
+- `DETERMINISTIC_ORIGINAL` is retained only as a recovery route after requested
+  generative candidates fail.
+- No masked generation or regional compositing is used; full-frame generation
+  performed better in the local benchmarks.
 
 Reference docs:
 - HunyuanVideo 1.5 ComfyUI workflow and model paths: https://docs.comfy.org/tutorials/video/hunyuan/hunyuan-video-1-5
-- AnimateDiff motion model: https://huggingface.co/guoyww/animatediff
 
 ## Environment Variables
 
@@ -173,13 +155,17 @@ Set these in `.env`:
 - `OUTPUT_DIR`: host path mounted to `/data/outputs`
 - `AUDIO_CACHE_DIR`: host path mounted to `/cache`
 - `AUDIO_HOST_PORT`: local forwarded audio port (example `8001`)
-- `OPENAI_API_KEY`: decision API key
-- `OPENAI_MODEL`: decision model (example `gpt-5.4-mini`)
 - `IMAGE2JSON_ENABLED`: enable image2json decision integration (default `true`)
 - `IMAGE2JSON_URL`: Ollama URL for image2json (default `http://host.docker.internal:11434`)
 - `IMAGE2JSON_MODEL`: image2json vision model (default `qwen3-vl:8b`)
 - `IMAGE2JSON_TEXT_MODEL`: Ollama text model for decision (default `qwen3:14b`)
 - `IMAGE2JSON_TIMEOUT`: image2json analysis timeout in seconds (default `300`)
+- `MEMPALACE_ENABLED`: retrieve relevant prior project experience for the text decision (default `true`)
+- `MEMPALACE_HOME_DIR`: host MemPalace home mounted by the read-only search API service (default `$HOME/.mempalace`)
+- `MEMPALACE_WING`: wing searched for comparable experience (default `image2videoAWSIG`)
+- `MEMPALACE_RESULTS`: maximum distinct memory cases included in a decision (default `3`)
+- `MEMPALACE_TIMEOUT`: memory search timeout in seconds (default `90`)
+- `MEMPALACE_REQUIRED`: fail the decision when memory is unavailable instead of continuing without it (default `false`)
 - `AUDIO_MODEL_BACKEND`: `tangoflux`, `audioldm`, or `mock`
 - `AUDIO_DEVICE`: `cuda` or `cpu`
 - `AUDIO_INFERENCE_STEPS`: AudioLDM inference steps (default `60`)
@@ -191,14 +177,14 @@ Set these in `.env`:
 - `HF_HUB_DISABLE_XET`: disable Hugging Face Xet transfer when model download stalls (default `1`)
 - `AUDIO_REQUEST_TIMEOUT_S`: orchestrator audio request timeout, useful for TangoFlux cold loads (default `900`)
 - `AUDIO_SEED_BASE`: deterministic seed base (default `42`)
-- `AUDIO_TARGET_LUFS`: loudness target for `loudnorm` (default `-14`)
+- `AUDIO_TARGET_LUFS`: generated-audio loudness target (default `-18`)
 - `AUDIO_TRUE_PEAK_DB`: true-peak ceiling in dB (default `-1.0`)
 - `AUDIO_BASS_GAIN_DB`: bass enhancement gain (default `0`)
 - `AUDIO_STEREO_MLEV`: stereo widening amount (default `0`)
 - `AUDIO_REVERB_DELAY_MS`: reverb delay in ms (default `700`)
 - `AUDIO_REVERB_DECAY`: reverb decay (default `0.08`)
-- `AUDIO_MUX_GAIN_DB`: gain added at final mux stage (default `3.0`)
-- `AUDIO_MUX_TARGET_LUFS`: mux-stage loudnorm target (default `-12.0`)
+- `AUDIO_MUX_GAIN_DB`: gain added at final mux stage (default `0.0`)
+- `AUDIO_MUX_TARGET_LUFS`: mux-stage loudnorm target (default `-18.0`)
 - `AUDIO_MUX_TRUE_PEAK_DB`: mux-stage true peak ceiling (default `-1.0`)
 - `FINAL_VIDEO_FPS`: final MP4 playback FPS after mux/post-processing (default `30`, does not increase Comfy generated frame count)
 - `FINAL_VIDEO_INTERPOLATION`: final mux smoothness mode: `off`, `duplicate`/`fps`, or `minterpolate` (default `off`)
@@ -217,8 +203,8 @@ Model handoff:
 - Comfy is stopped through Docker after render output is found and before audio generation; if Docker socket access is unavailable, the orchestrator falls back to Comfy `/free`.
 - Audio is stopped through Docker before Comfy rendering and started again before audio generation; if Docker socket access is unavailable, the orchestrator falls back to audio `/unload`.
 
-Use the variable names above directly. Older aliases such as `DECISION_OPENAI_MODEL`,
-`PIPELINE_AUDIO_MODEL_BACKEND`, and `ANIMATEDIFF_MODEL_DIR` are not used by compose.
+Use the variable names above directly. Older cloud-decision and retired-model
+environment variables are not used by compose.
 
 Container runtime env is set in compose:
 - `COMFY_URL=http://comfyui:8188`
@@ -235,7 +221,7 @@ docker compose --env-file $(pwd)/.env \
   up -d --build
 ```
 
-The Comfy image pins official PyTorch CUDA 13 wheels (`torch==2.10.0+cu130`) so Hunyuan can use the optimized CUDA operations requested by ComfyUI. The GPU compose profile still starts Comfy with `--lowvram`; on RTX 3090 this avoids HunyuanVideo 1.5 restarts after sampling while keeping the 720P preset usable.
+The Comfy image pins official PyTorch CUDA 13 wheels (`torch==2.10.0+cu130`) so Hunyuan can use the optimized CUDA operations requested by ComfyUI. On the tested RTX 3090, the GPU compose profile runs without `--lowvram` and uses `--cache-none --disable-pinned-memory`. Wan uses full VAE decode. Hunyuan still uses tiled decode because full 61-frame decode has restarted Comfy on this host; its remaining grid issue requires separate validation.
 
 If the running Comfy container was built before this change, rebuild and recreate it:
 
@@ -313,38 +299,66 @@ Applied automatically when no explicit override is provided:
 {"render_variants":"selected_pair"}
 ```
 
-`seed` is auto-generated per run unless you pass it explicitly.
+Candidate seeds are derived reproducibly from the source image hash unless you pass an explicit override.
 
 Available video presets:
+- `WAN22_NATURAL`
+- `DETERMINISTIC_ORIGINAL`
 - `HUNYUAN15_I2V_720P`
 - `HUNYUAN15_I2V_FAST`
-- `SVD_SUBTLE`
-- `SVD_STRONG`
-- `ANIMATEDIFF_GRASS_WIND`
-- `ANIMATEDIFF_CITY_PULSE`
 
 Preset behavior:
-- Hunyuan presets animate the cropped input by default, or the original full image when wide-pan preservation is requested.
-- SVD presets animate the cropped input image directly with SVD, or original input for wide-pan preservation.
-- AnimateDiff presets animate the cropped input image directly with SD 1.5 + AnimateDiff motion module, or original input for wide-pan preservation.
-- `HUNYUAN15_I2V_720P`: higher-quality RTX 3090 direct I2V profile, lighter than full 720p but better than FAST
-- `HUNYUAN15_I2V_FAST`: lower-step Hunyuan fallback for time/VRAM pressure and routine batch runs
-- `SVD_SUBTLE`: conservative direct SVD motion
-- `SVD_STRONG`: stronger direct SVD motion with higher quality settings
-- `ANIMATEDIFF_GRASS_WIND`: real AnimateDiff outdoor/nature profile
-- `ANIMATEDIFF_CITY_PULSE`: real AnimateDiff urban/night/reflections profile
-- The decision service chooses the preset; local defaults raise quality and clamp per backend.
+- Wan and Hunyuan generation preserve the source aspect ratio. Instagram
+  square/9:16 framing, slow pan, push, or pull is applied deterministically to
+  the generated full-frame video afterward.
+- `WAN22_NATURAL`: 97 generated frames at 20 FPS, 20 steps, 768-pixel long edge.
+- `HUNYUAN15_I2V_720P`: 61 generated frames at 12 FPS, 50 steps, 704-pixel long edge with tiled VAE decode for host-memory safety.
+- `DETERMINISTIC_ORIGINAL`: recovery-only treatment used when requested generative candidates fail; it is not a normal decision output.
+- Wan and Hunyuan render the original full image when source-aspect preservation is requested.
+- `HUNYUAN15_I2V_FAST`: shorter 30-frame Hunyuan fallback; it retains 50 steps because the installed checkpoint is not step-distilled
+- The decision service first runs image2json, searches MemPalace with the
+  observed scene/motion/crop properties, then gives both inputs to the local
+  text model. Its semantic model choice, short action prompt, candidate count,
+  and presentation plan are compiled into fixed renderer profiles.
+- The decision service chooses the preset; local validation clamps per backend.
+- Post-generation `pan_*`, `push_in`, and `pull_out` operations are deterministic
+  FFmpeg presentation effects. City and architectural landscapes prefer a subtle
+  push or bounded pan unless motion would crop required content.
+- Presentation focus is resolved from observed normalized image2json regions.
+  The crop is positioned around that region before a push begins, so an
+  off-center focal subject is not discarded by the initial 9:16/square cover
+  crop. `must_keep_visible` is reduced to regions that fit at both endpoints;
+  `focus_region`, `required_regions`, and `visibility_validation` are saved in
+  the technical plan for review.
+- A panorama explicitly classified as wide, full-width-important, and high-risk
+  for vertical cropping uses square delivery with a smooth deterministic
+  traversal instead of losing the composition in one fixed portrait crop.
+- Generation prompts contain localized subject/environment motion only. Camera
+  push/pan/zoom is removed and executed during deterministic post-production.
+  Static hints such as sunlight, accumulated snow, and depth layers are removed
+  from natural-motion evidence, and a target cannot also be kept stable.
+- If image2json identifies a landscape/city as viewed through a near foreground
+  frame or opening, the compiler uses an `enter_frame` push. It derives the
+  endpoint from the distant focal region in `spatial_map` and zooms far enough
+  for the foreground frame to leave the final crop. Zoom parameters are saved in
+  the candidate result JSON; the current endpoint is 2.0x for 9:16 and 2.2x for
+  square delivery. Timeline normalization happens before the zoom so
+  native 97-frame WAN video completes the motion across all 150 delivery frames.
 - Hunyuan presets are hard-clamped to local safe defaults because large frame counts can restart Comfy before history/output is saved.
 - Batch rendering defaults to the primary preset plus the first fallback from a different backend family; if a selected-pair render attempt fails without OOM, the next closest decision fallback is enqueued before continuing.
 - For wide compositions where a single vertical crop loses the subject relationship, decisions can set `video.params.use_original_input_for_video=true`; the original image is rendered and final mux uses a 9:16 pan/crop rather than padding.
+- Every successful candidate receives a companion `.result.json` containing
+  the source hash, image2json analysis, retrieved memory evidence, semantic and
+  technical plans, seeds/settings, artifact hashes, and a pending human-feedback
+  section. These comparable records are the input for later MemPalace mining.
 
 Override at runtime:
 
 ```bash
---video-params-json '{"render_variants":"svd","crop_anchor":"center_center"}'
+--video-params-json '{"render_variants":"wan","crop_anchor":"center_center"}'
 ```
 
-Valid `render_variants` values are `selected_pair`, `all`, `hunyuan`, `svd`, `animatediff`, and `selected`.
+Valid `render_variants` values are `selected_pair`, `all`, `wan`, `hunyuan`, and `selected`.
 The selected preset supplies its own frame count and resolution defaults. The pipeline then applies shared quality defaults and clamps them per backend.
 
 Add extra animation or styling directions at runtime:
@@ -379,10 +393,8 @@ docker compose --env-file $(pwd)/.env \
 
 - `video_output/out/<job-id>/<image-basename>/final_YYYYMMDD_HHMMSS_hunyuan.mp4`
 - `video_output/out/<job-id>/<image-basename>/final_YYYYMMDD_HHMMSS_hunyuan.jpg`
-- `video_output/out/<job-id>/<image-basename>/final_YYYYMMDD_HHMMSS_svd.mp4`
-- `video_output/out/<job-id>/<image-basename>/final_YYYYMMDD_HHMMSS_svd.jpg`
-- `video_output/out/<job-id>/<image-basename>/final_YYYYMMDD_HHMMSS_animatediff.mp4`
-- `video_output/out/<job-id>/<image-basename>/final_YYYYMMDD_HHMMSS_animatediff.jpg`
+- `video_output/out/<job-id>/<image-basename>/final_YYYYMMDD_HHMMSS_wan.mp4`
+- `video_output/out/<job-id>/<image-basename>/final_YYYYMMDD_HHMMSS_wan.jpg`
 - `video_output/out/<job-id>/<image-basename>/debug_YYYYMMDD_HHMMSS.json`
 
 Final MP4s are normalized as `1080x1920` for Reel output or `1080x1080` when `video.params.output_aspect=square_1_1`, with square pixels, H.264, AAC, `yuv420p`. The mux step outputs `FINAL_VIDEO_FPS` playback FPS; FFmpeg `minterpolate` smoothing can be enabled explicitly with `FINAL_VIDEO_INTERPOLATION=minterpolate` without increasing Comfy VRAM use. The matching JPG is extracted from the final video crop.
