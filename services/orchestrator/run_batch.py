@@ -25,6 +25,7 @@ if __package__ is None or __package__ == "":
 from services.decision.decision_service import decide_for_image_detailed
 from services.orchestrator.comfy_client import ComfyClient, find_latest_mp4
 from services.orchestrator.mux import mux_video_audio
+from services.orchestrator.quality import assess_temporal_stability, needs_temporal_stability_gate
 from services.orchestrator.validate import validate_and_clamp_decision
 
 
@@ -945,6 +946,44 @@ def process_one_image(
                 except Exception as exc:
                     _step_failed("find_comfy_output", t_find_video, exc, job_id=job_id, input_key=input_key, attempt_index=idx)
                     raise
+                attempt["video_path"] = str(video_path)
+                analysis = image2json_meta.get("analysis") if isinstance(image2json_meta.get("analysis"), dict) else {}
+                if needs_temporal_stability_gate(analysis, video_cfg):
+                    # Inspect the untouched Comfy MP4 here, before presentation
+                    # pan/zoom and muxing. If this fails, debug.json can prove
+                    # that the discontinuity came from generation and the loop
+                    # can advance to the next planned seed without generating
+                    # audio for a candidate that will be discarded.
+                    t_quality = _step_start(
+                        "temporal_quality",
+                        job_id=job_id,
+                        input_key=input_key,
+                        attempt_index=idx,
+                        video_path=str(video_path),
+                    )
+                    temporal_quality = assess_temporal_stability(
+                        video_path,
+                        local_input,
+                        fps=int(video_cfg.get("fps", 20)),
+                        expected_frames=int(video_cfg.get("frames", 97)),
+                    )
+                    attempt["temporal_quality"] = temporal_quality
+                    if not temporal_quality.get("passed", True):
+                        error = RuntimeError(
+                            "Raw render rejected by temporal quality gate: "
+                            f"mean_similarity_step={temporal_quality.get('mean_similarity_step')} "
+                            f"max_similarity_step={temporal_quality.get('max_similarity_step')}"
+                        )
+                        _step_failed("temporal_quality", t_quality, error, job_id=job_id, input_key=input_key, attempt_index=idx)
+                        raise error
+                    _step_done(
+                        "temporal_quality",
+                        t_quality,
+                        result=temporal_quality,
+                        job_id=job_id,
+                        input_key=input_key,
+                        attempt_index=idx,
+                    )
                 _release_comfy_models(comfy, reason="before_audio_generation", job_id=job_id, input_key=input_key, attempt_index=idx)
                 _ensure_audio_service(audio_url, reason="before_audio_generation", job_id=job_id, input_key=input_key, attempt_index=idx)
 

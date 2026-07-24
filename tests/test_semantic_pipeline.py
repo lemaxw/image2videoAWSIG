@@ -4,12 +4,24 @@ from pathlib import Path
 
 from PIL import Image
 
-from services.decision.semantic_planner import build_memory_query, compile_semantic_plan, sanitize_analysis_for_decision
+from services.decision.semantic_planner import (
+    build_memory_query,
+    compile_semantic_plan,
+    sanitize_analysis_for_decision,
+)
 from services.orchestrator.comfy_client import ComfyClient, tiled_vae_decode_node
 from services.orchestrator.mux import _normalized_video_filter
+from services.orchestrator.quality import (
+    _summary_from_ssim_output,
+    needs_temporal_stability_gate,
+)
 from services.orchestrator.review import update_feedback
 from services.orchestrator.run_batch import _video_variants_for_decision
-from services.orchestrator.validate import _compose_audio_prompt, validate_and_clamp_decision
+from services.orchestrator.validate import (
+    _compose_audio_prompt,
+    validate_and_clamp_decision,
+)
+from services.pipeline_mcp.tools import _workspace_path
 
 
 def plan(backend="wan22", operation="static"):
@@ -411,6 +423,31 @@ class SemanticPipelineTests(unittest.TestCase):
         self.assertIn("1+1.2000*on/149", enter_filter)
         self.assertIn("0.5350", enter_filter)
 
+    def test_temporal_gate_only_targets_low_motion_fragile_wan_pushes(self):
+        analysis = {
+            "dynamic_potential": {"level": "low"},
+            "content_complexity": {"dense_details": True, "fine_geometry": True},
+        }
+        video = {"preset": "WAN22_NATURAL", "params": {"final_crop_motion": "push_in"}}
+        self.assertTrue(needs_temporal_stability_gate(analysis, video))
+        self.assertFalse(needs_temporal_stability_gate(analysis, {"preset": "HUNYUAN15_I2V_720P", "params": {"final_crop_motion": "push_in"}}))
+        self.assertFalse(needs_temporal_stability_gate({"dynamic_potential": {"level": "medium"}, "content_complexity": {"dense_details": True}}, video))
+
+    def test_temporal_similarity_summary_exposes_discontinuity_steps(self):
+        summary = _summary_from_ssim_output(
+            "\n".join(
+                [
+                    "n:1 Y:0.9 All:0.82 (7.0)",
+                    "n:2 Y:0.8 All:0.80 (6.9)",
+                    "n:3 Y:0.7 All:0.65 (6.0)",
+                    "n:4 Y:0.7 All:0.64 (5.9)",
+                ]
+            )
+        )
+        self.assertEqual(summary["sample_count"], 4)
+        self.assertAlmostEqual(summary["mean_similarity_step"], 0.06)
+        self.assertAlmostEqual(summary["max_similarity_step"], 0.15)
+
     def test_tiled_vae_uses_safe_temporal_window(self):
         node = tiled_vae_decode_node("9", "3")
         self.assertEqual(node["class_type"], "VAEDecodeTiled")
@@ -433,6 +470,10 @@ class SemanticPipelineTests(unittest.TestCase):
             persisted = __import__("json").loads(path.read_text(encoding="utf-8"))
         self.assertEqual(updated["state"], "REJECTED")
         self.assertEqual(persisted["human_feedback"]["issue_codes"], ["motion_too_strong"])
+
+    def test_pipeline_mcp_rejects_paths_outside_workspace(self):
+        with self.assertRaises(ValueError):
+            _workspace_path("../outside-image2video-workspace", must_exist=False)
 
 
 if __name__ == "__main__":

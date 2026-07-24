@@ -32,6 +32,9 @@ Local-only image-to-video pipeline (no AWS/S3/AMI/infra flow).
     renders selected variants with Comfy, generates audio, muxes final mp4s, exports matching JPG stills, writes `debug.json`.
   - Wide scenes can use the original image and `video.params.output_aspect=square_1_1`
     when a vertical Reel crop would be too zoomed. The matching JPG still is extracted from the final cropped video.
+  - Low-motion, detail-dense Wan push/pull candidates are checked for abrupt
+    raw-frame continuity changes before audio generation and muxing. A rejected
+    seed is recorded in `debug.json`, and the next planned seed is tried.
 
 ## Flow
 
@@ -195,7 +198,9 @@ Set these in `.env`:
 
 The orchestrator prints structured `step.start`, `step.done`, and `step.failed`
 logs around each major operation. Step completion logs include elapsed seconds and
-result details; failures include the exception type and message.
+result details; failures include the exception type and message. Eligible Wan
+renders also log a `temporal_quality` step with source-similarity continuity
+metrics and pass/reject status.
 
 Model handoff:
 - image2json vision uses `IMAGE2JSON_MODEL` (`qwen3-vl:8b`) and is unloaded from Ollama before the text decision model starts.
@@ -290,6 +295,28 @@ docker compose --env-file $(pwd)/.env \
   --local-input-dir /data/local_inputs \
   --local-output-dir /data/local_outputs
 ```
+
+## Codex MCP tools
+
+A local STDIO MCP server exposes narrow pipeline operations to Codex without
+allowing arbitrary shell commands:
+
+- inspect a case and its media metadata
+- render one input with explicit pipeline overrides
+- remux an existing raw clip with deliberate pan/zoom/aspect settings
+- run the production temporal quality measurement
+- record candidate acceptance or rejection
+
+Register the server once:
+
+```bash
+codex mcp add image2video-pipeline -- \
+  /home/lemaxw/hobby/image2videoAWSIG/scripts/run_pipeline_mcp.sh
+```
+
+Restart Codex after registration. See
+[`services/pipeline_mcp/README.md`](services/pipeline_mcp/README.md) for tool
+scope and requirements.
 
 ## Defaults
 
