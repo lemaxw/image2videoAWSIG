@@ -39,6 +39,9 @@ The decision service uses a mandatory two-step local flow:
 - `IMAGE2JSON_MODEL`: image2json vision model (default `qwen3-vl:8b`)
 - `IMAGE2JSON_TEXT_MODEL`: Ollama text model for decision (default `qwen3:14b`)
 - `IMAGE2JSON_TIMEOUT`: image2json analysis timeout in seconds (default `300`)
+- `IMAGE2JSON_MAX_IMAGE_SIDE`: longest image side sent to image2json (default `1600`)
+- `IMAGE2JSON_RETRIES`: retry count for image2json vision calls (default `1`)
+- `IMAGE2JSON_SHORT_VERSION`: use the shorter image2json analysis prompt/schema (default `false`)
 
 **Behavior**:
 - If `IMAGE2JSON_ENABLED=true` and image2json is installed, the two-step flow is used
