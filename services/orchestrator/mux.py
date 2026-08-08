@@ -158,6 +158,8 @@ def mux_video_audio(
         mux_true_peak_db = -1.0
     effective_mix_db = max(-24.0, min(12.0, float(mix_db) + gain_boost_db))
     target_duration_s = _clamp_float(float(target_duration_s), 1.0, 30.0)
+    keyframe_interval = max(1, output_fps)
+    video_track_timescale = output_fps * 1000
     zoom_end = _clamp_float(float(zoom_end), 1.02, 2.2)
     zoom_focus_x = _clamp_float(float(zoom_focus_x), 0.0, 1.0)
     zoom_focus_y = _clamp_float(float(zoom_focus_y), 0.0, 1.0)
@@ -165,7 +167,12 @@ def mux_video_audio(
         f"[0:v]{_normalized_video_filter(video_fit, pan_start=pan_start, pan_end=pan_end, output_aspect=output_aspect, output_fps=output_fps, interpolation=interpolation, target_duration_s=target_duration_s, zoom_end=zoom_end, zoom_focus_x=zoom_focus_x, zoom_focus_y=zoom_focus_y)}[v0];"
         f"[1:a]loudnorm=I={mux_target_lufs}:TP={mux_true_peak_db}:LRA=11,"
         f"volume={effective_mix_db}dB,"
-        f"apad=pad_dur={target_duration_s:.3f},atrim=duration={target_duration_s:.3f},asetpts=PTS-STARTPTS[a1]"
+        f"aresample=44100:async=1:first_pts=0,"
+        f"apad=pad_dur={target_duration_s:.3f},atrim=duration={target_duration_s:.3f},"
+        # Native AAC has a 1024-sample encoder delay. Move the filtered audio
+        # forward by that amount so the encoded packet timeline begins at zero
+        # without an MP4 edit list.
+        f"asetpts=PTS-STARTPTS+1024/SR/TB[a1]"
     )
 
     cmd_reencode = [
@@ -181,27 +188,61 @@ def mux_video_audio(
         "[v0]",
         "-map",
         "[a1]",
+        "-map_metadata",
+        "-1",
+        "-map_chapters",
+        "-1",
         "-c:v",
         "libx264",
         "-preset",
         "medium",
         "-crf",
         "18",
+        "-maxrate",
+        "6M",
+        "-bufsize",
+        "12M",
         "-profile:v",
-        "high",
+        "main",
         "-level",
         "4.1",
+        # Keep decode and presentation order identical at the beginning of the
+        # file. Some social-media thumbnailers otherwise render the negative
+        # DTS preroll created by H.264 B-frames as a black first frame.
+        "-bf",
+        "0",
+        "-g",
+        str(keyframe_interval),
+        "-keyint_min",
+        str(keyframe_interval),
+        "-sc_threshold",
+        "0",
         "-r",
         str(output_fps),
+        "-fps_mode",
+        "cfr",
+        "-video_track_timescale",
+        str(video_track_timescale),
         "-pix_fmt",
         "yuv420p",
         "-c:a",
         "aac",
         "-b:a",
-        "192k",
+        "128k",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        # Meta's upload guidance explicitly excludes MP4 edit lists. They can
+        # play normally while its web editor fails to build cover thumbnails.
+        "-use_editlist",
+        "0",
         "-movflags",
         "+faststart",
-        "-shortest",
+        "-brand",
+        "mp42",
+        "-t",
+        f"{target_duration_s:.3f}",
         str(output_path),
     ]
     try:
