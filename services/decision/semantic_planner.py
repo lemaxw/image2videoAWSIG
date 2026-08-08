@@ -146,9 +146,13 @@ Motion discipline:
 - Sunlight, shadows, accumulated snow, fixed terrain, and depth layers are not
   natural-motion elements. Loose powder falling from a branch may move, but the
   accumulated snow and ground snow remain fixed.
-- For flowers, request visible localized stem sway and petal flutter while rocks,
-  cacti, trunks, and terrain remain fixed. Avoid vague wording such as merely
-  "subtle movement".
+- For one clearly visible individual flower, request localized stem sway and
+  petal flutter. For flowering shrubs or trees, animate only the already visible
+  branches and their many small blossoms; keep their original scale and distance
+  and never promote one blossom into a new foreground flower.
+- In a deep mountain landscape where clouds are the main motion opportunity,
+  make cloud displacement and edge evolution clearly visible and keep the dense
+  forest stable. Do not describe generic forest foliage as stems or petals.
 
 Audio:
 - Keep ambience quiet and subordinate to the picture.
@@ -400,6 +404,13 @@ def _find_region(label: Any, regions: list[Dict[str, Any]]) -> Dict[str, Any] | 
     return matches[0] if matches else None
 
 
+def _is_flowering_vegetation_label(value: Any) -> bool:
+    lower = _text(value).lower()
+    return any(term in lower for term in ("popp", "flower", "blossom", "petal")) and any(
+        term in lower for term in ("shrub", "bush", "tree", "branch", "bough", "canopy", "orchard")
+    )
+
+
 def _motion_action(label: str, requested_action: str, analysis: Dict[str, Any]) -> str:
     """Turn vague/camera motion into localized, physically plausible motion."""
     target = _text(label)
@@ -408,7 +419,14 @@ def _motion_action(label: str, requested_action: str, analysis: Dict[str, Any]) 
     action_lower = action.lower()
     camera_only = any(term in action_lower for term in _CAMERA_TERMS)
     vague = not action or camera_only or any(term in action_lower for term in ("subtle movement", "simulate natural", "motion"))
-    if any(term in lower for term in ("popp", "flower", "blossom", "petal")):
+    flower_target = any(term in lower for term in ("popp", "flower", "blossom", "petal"))
+    flowering_vegetation = _is_flowering_vegetation_label(target)
+    if flowering_vegetation:
+        return (
+            f"branches of the existing {target} sway gently and their many small blossoms flutter, "
+            "remaining at their original scale and distance"
+        )
+    if flower_target:
         description = " ".join(
             _text(item.get("description")).lower()
             for item in (analysis.get("subjects") or [])
@@ -418,7 +436,7 @@ def _motion_action(label: str, requested_action: str, analysis: Dict[str, Any]) 
         return f"the prominent {location}flower stem sways gently and its petals flutter visibly"
     if "snow" in lower and any(term in lower for term in ("tree", "branch", "bough")):
         return "snow-laden outer boughs near the sunlit focal area flex gently and visibly in a light breeze"
-    if any(term in lower for term in ("tree", "branch", "bough", "foliage", "leaves")):
+    if any(term in lower for term in ("forest", "woodland", "tree", "branch", "bough", "foliage", "leaves")):
         snowy = "snow" in _text(analysis.get("summary")).lower()
         return (
             "snow-laden outer boughs near the sunlit focal area flex gently and visibly in a light breeze"
@@ -428,7 +446,16 @@ def _motion_action(label: str, requested_action: str, analysis: Dict[str, Any]) 
     if "snow" in lower:
         return "nearby flexible bough tips move gently while accumulated snow remains fixed"
     if "cloud" in lower:
-        return f"{target} drift visibly and steadily across the sky"
+        summary = _text(analysis.get("summary")).lower()
+        if any(term in summary for term in ("mountain", "peak", "summit")):
+            return (
+                f"{target} move visibly and continuously across and around the mountain peaks, "
+                "with evolving edges and a clear change in position by the end"
+            )
+        return (
+            f"{target} drift visibly and continuously across the sky, with evolving edges "
+            "and a clear change in position by the end"
+        )
     if any(term in lower for term in ("stream", "river", "water", "wave", "reflection")):
         return f"{target} show clear continuous flow and small natural ripples"
     if any(term in lower for term in ("grass", "reed", "crop")):
@@ -477,6 +504,12 @@ def _normalize_motion_plan(plan: Dict[str, Any], analysis: Dict[str, Any]) -> Di
             usable = [("outer foliage", "")]
     primary = usable[0] if usable else ("", "")
     secondary = usable[1] if len(usable) > 1 else ("", "")
+    dropped_cloud_secondary = ""
+    if "cloud" in primary[0].lower() and any(
+        term in secondary[0].lower() for term in ("forest", "woodland", "canopy")
+    ):
+        dropped_cloud_secondary = secondary[0]
+        secondary = ("", "")
     stable = [_text(value) for value in (motion.get("keep_stable") or []) if _text(value)]
     moving_labels = [primary[0], secondary[0]]
     stable = [value for value in stable if not any(_labels_overlap(value, moving) for moving in moving_labels if moving)]
@@ -487,9 +520,15 @@ def _normalize_motion_plan(plan: Dict[str, Any], analysis: Dict[str, Any]) -> Di
     ]
     stable.extend(value for value in rejected_physical if value not in stable)
     stable.extend(value for value in rigid_breeze if value not in stable)
+    if dropped_cloud_secondary and dropped_cloud_secondary not in stable:
+        stable.append(dropped_cloud_secondary)
     if primary[0] and any(term in primary[0].lower() for term in ("snow", "tree", "branch", "bough")):
         stable = ["tree trunks", "ground snow", "overall forest geometry"]
-    if primary[0] and any(term in primary[0].lower() for term in ("popp", "flower", "blossom", "petal")):
+    if primary[0] and _is_flowering_vegetation_label(primary[0]):
+        for value in ("main woody shrub structure", "fixed terrain"):
+            if value not in stable:
+                stable.append(value)
+    elif primary[0] and any(term in primary[0].lower() for term in ("popp", "flower", "blossom", "petal")):
         stable = ["rocks", "cacti", "tree trunks", "fixed terrain"]
     if not stable:
         stable = ["fixed terrain and structural geometry"]

@@ -286,6 +286,63 @@ class SemanticPipelineTests(unittest.TestCase):
         self.assertEqual(params["must_keep_visible"], ["red poppies"])
         self.assertEqual(params["visibility_validation"]["status"], "adjusted")
 
+    def test_flowering_shrubs_stay_existing_small_parts_instead_of_macro_flower(self):
+        shrub_plan = plan(operation="pan_left_to_right")
+        shrub_plan["motion_plan"] = {
+            "primary_target": "flowering shrubs",
+            "primary_action": "the flowering shrubs sway gently",
+            "secondary_target": "clouds",
+            "secondary_action": "clouds drift",
+            "keep_stable": ["cityscape", "mountains"],
+        }
+        analysis = {
+            "summary": "A panoramic cityscape with flowering shrubs in the foreground.",
+            "subjects": [
+                {
+                    "label": "flowering shrubs",
+                    "description": "Pink flowering shrub branches extending into the frame.",
+                    "spatial": {"distance_layer": "foreground", "relative_size": "large"},
+                }
+            ],
+            "people": [],
+        }
+
+        decision = compile_semantic_plan(shrub_plan, analysis, "q" * 64)
+        prompt = decision["video"]["params"]["prompt"].lower()
+        self.assertIn("branches of the existing flowering shrubs", prompt)
+        self.assertIn("many small blossoms", prompt)
+        self.assertIn("original scale and distance", prompt)
+        self.assertNotIn("prominent flower stem", prompt)
+        self.assertIn("cityscape", prompt)
+        self.assertIn("mountains", prompt)
+        self.assertNotIn("cacti", prompt)
+
+    def test_cloud_dominant_mountain_plan_holds_dense_forest_stable(self):
+        mountain_plan = plan(operation="push_in")
+        mountain_plan["motion_plan"] = {
+            "primary_target": "clouds",
+            "primary_action": "clouds drift visibly across the sky",
+            "secondary_target": "forest",
+            "secondary_action": "localized stem sway and petal flutter in foliage",
+            "keep_stable": ["mountain range", "rocky foreground"],
+        }
+        analysis = {
+            "summary": "Mountain peaks surrounded by clouds above a dense forest.",
+            "subjects": [
+                {"label": "clouds", "spatial": {"distance_layer": "background"}},
+                {"label": "forest", "spatial": {"distance_layer": "midground"}},
+            ],
+            "people": [],
+        }
+
+        decision = compile_semantic_plan(mountain_plan, analysis, "m" * 64)
+        motion = decision["semantic_plan"]["motion_plan"]
+        prompt = decision["video"]["params"]["prompt"].lower()
+        self.assertEqual(motion["secondary_target"], "")
+        self.assertIn("forest", motion["keep_stable"])
+        self.assertIn("clear change in position by the end", prompt)
+        self.assertNotIn("petal", prompt)
+
     def test_winter_prompt_separates_branch_motion_from_static_geometry(self):
         winter_plan = plan(operation="push_in")
         winter_plan["motion_plan"] = {
