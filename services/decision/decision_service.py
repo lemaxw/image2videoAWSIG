@@ -135,6 +135,9 @@ def decide_for_image_detailed(image_path: Path, metadata: Dict[str, Any] | None 
     vision_model = os.environ.get("IMAGE2JSON_MODEL", "qwen3-vl:8b")
     text_model = os.environ.get("IMAGE2JSON_TEXT_MODEL", "qwen3:14b")
     timeout = float(os.environ.get("IMAGE2JSON_TIMEOUT", "300"))
+    max_image_side = max(512, min(2048, int(os.environ.get("IMAGE2JSON_MAX_IMAGE_SIDE", "1600"))))
+    retries = max(0, min(2, int(os.environ.get("IMAGE2JSON_RETRIES", "1"))))
+    short_version = os.environ.get("IMAGE2JSON_SHORT_VERSION", "false").lower() == "true"
     if vision_model == text_model or "vl" not in vision_model.lower():
         raise RuntimeError(
             "IMAGE2JSON_MODEL must be the vision model qwen3-vl:8b; "
@@ -149,6 +152,9 @@ def decide_for_image_detailed(image_path: Path, metadata: Dict[str, Any] | None 
         url=ollama_url,
         image_path=str(image_path),
         timeout_s=timeout,
+        max_image_side=max_image_side,
+        retries=retries,
+        short_version=short_version,
     )
     try:
         analyzer = ImageAnalyzer(
@@ -156,7 +162,9 @@ def decide_for_image_detailed(image_path: Path, metadata: Dict[str, Any] | None 
                 model=vision_model,
                 ollama_url=ollama_url,
                 timeout=timeout,
-                short_version=False,
+                retries=retries,
+                max_image_side=max_image_side,
+                short_version=short_version,
             )
         )
         analysis = analyzer.analyze_path(image_path)
@@ -274,6 +282,9 @@ def decide_for_image_detailed(image_path: Path, metadata: Dict[str, Any] | None 
             "model": vision_model,
             "vision_model": vision_model,
             "text_model": text_model,
+            "max_image_side": max_image_side,
+            "retries": retries,
+            "short_version": short_version,
             "analysis": analysis_dict,
             "text_response": text_response,
         },
